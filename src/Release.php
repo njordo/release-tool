@@ -138,7 +138,7 @@ class Release
         }
     }
 
-    protected function processCommandTask2(array $task): void
+    protected function processCommandTask(array $task): void
     {
         foreach ($task['items'] as $item) {
             // run command
@@ -153,7 +153,7 @@ class Release
         }
     }
 
-    protected function processCopyTask2(array $task): void
+    protected function processCopyTask(array $task): void
     {
         $baseTargetFolderPath = $this->targetPath($task['target']);
         $this->createFolder($baseTargetFolderPath);
