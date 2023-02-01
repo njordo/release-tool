@@ -34,7 +34,7 @@ class Release
         }
 
         $this->config = json_decode(file_get_contents($configFilePath), JSON_OBJECT_AS_ARRAY);
-        $this->targetFolderPath = $this->sourcePath($this->config['target'] ?? static::TARGET_FOLDER_NAME);
+        $this->targetFolderPath = $this->sourcePath(static::TARGET_FOLDER_NAME);
 
         $this->renderVar('Target folder', $this->targetFolderPath);
 
@@ -56,8 +56,13 @@ class Release
 //        $a = $this->renderQuestion('Do you need FTP?');
 //        $this->renderVar('FTP', $a);
 
-        $this->deleteFolder($this->targetFolderPath);
-        $this->createFolder($this->targetFolderPath);
+        try {
+            $this->deleteFolder($this->targetFolderPath);
+            $this->createFolder($this->targetFolderPath);
+        } catch (Exception $e) {
+            $this->renderError($e->getMessage());
+            exit;
+        }
 
         $this->run();
 
@@ -124,7 +129,7 @@ class Release
     protected function processDeleteTask(array $task): void
     {
         foreach ($task['items'] as $item) {
-            $searchFolderPath = $this->sourcePath(is_array($item) ? $item['folder'] : $item);
+            $searchFolderPath = $this->sourcePath($this->getItemFolder($item));
 
             foreach (iterator_to_array($this->initFinder($searchFolderPath, $item)) as $matchedItem) {
                 $path = $matchedItem->getRealPath();
@@ -140,54 +145,44 @@ class Release
 
     protected function processCommandTask(array $task): void
     {
-        foreach ($task['items'] as $item) {
+        foreach ($task['items'] as $command) {
             // run command
-            $output = `$item`;
+            $result = shell_exec($command);
+
+            if (!$result) {
+                throw new Exception(sprintf('Command can not be completed: %s', $command));
+            }
         }
     }
 
-    protected function processMkdirTask(array $task): void
+    protected function processMkdirTask2(array $task): void
     {
         foreach ($task['items'] as $item) {
             $this->createFolder($this->targetPath($item));
         }
     }
 
-    protected function processCopyTask(array $task): void
+    protected function processZipTask2(array $task): void
     {
-        $baseTargetFolderPath = $this->targetPath($task['target']);
-        $this->createFolder($baseTargetFolderPath);
-
         $itemZipArchive = new ZipArchive;
         $itemZipFilePath = $this->targetPath($task['zip']);
         $itemZipArchive->open($itemZipFilePath, ZipArchive::CREATE);
 
         foreach ($task['items'] as $item) {
-            $searchFolderPath = $this->sourcePath(is_array($item) ? $item['folder'] : $item);
+            $relativePath = $this->getItemFolder($item);
+            $searchFolderPath = $this->sourcePath($relativePath);
 
             foreach ($this->initFinder($searchFolderPath, $item) as $matchedItem) {
-//                    $this->renderText(sprintf('Matched item: %s', $matchedItem->getRealPath()));
-
-                $matchedItemTempPath = str_replace($this->sourceFolderPath, $baseTargetFolderPath, $matchedItem->getRealPath());
-                $zipRealPath = trim(str_replace($baseTargetFolderPath, '', $matchedItemTempPath), DIRECTORY_SEPARATOR);
+                $zipPath = $relativePath . DIRECTORY_SEPARATOR . $matchedItem->getRelativePathname();
 
                 // if the found item is a folder
                 if (is_dir($matchedItem->getRealPath())) {
-                    $this->createFolder($matchedItemTempPath);
-//                        $this->renderText(sprintf('Add folder to full zip archive: %s', $zipRealPath));
-
-                    $this->zip->addEmptyDir($zipRealPath);
-                    $itemZipArchive->addEmptyDir($zipRealPath);
+                    $this->zip->addEmptyDir($zipPath);
+                    $itemZipArchive->addEmptyDir($zipPath);
                 } else {
-                    $matchedFileTempFolderPath = substr($matchedItemTempPath, 0, strrpos($matchedItemTempPath, $matchedItem->getFilename()) - 1);
-                    $this->createFolder($matchedFileTempFolderPath);
-
-                    // copy file to the temp folder
-                    $this->copyFile($matchedItem->getRealPath(), $matchedItemTempPath);
-
                     // zip file to the full archive
-                    $this->zip->addFile($matchedItem->getRealPath(), $zipRealPath);
-                    $itemZipArchive->addFile($matchedItem->getRealPath(), $zipRealPath);
+                    $this->zip->addFile($matchedItem->getRealPath(), $zipPath);
+                    $itemZipArchive->addFile($matchedItem->getRealPath(), $zipPath);
                 }
             }
         }
@@ -201,16 +196,26 @@ class Release
             $methodName = sprintf('process%sTask', ucfirst($this->getTaskType($task)));
 
             if (method_exists($this, $methodName)) {
-                $this->$methodName($task);
+                try {
+                    $this->$methodName($task);
+                    $this->renderResult(sprintf('Task #%d (%s)', ++$i, $this->getTaskType($task)), TRUE);
+                } catch (Exception $e) {
+                    $this->renderError($e->getMessage());
+                    $this->renderResult(sprintf('Task #%d (%s)', ++$i, $this->getTaskType($task)), FALSE);
+                    exit;
+                }
             }
-
-            $this->renderResult(sprintf('Task #%d (%s)', ++$i, $this->getTaskType($task)), method_exists($this, $methodName));
         }
     }
 
     protected function getTaskType(array $task): string
     {
-        return $task['type'] ?? 'copy';
+        return $task['type'] ?? 'zip';
+    }
+
+    protected function getItemFolder(string|array $item): string
+    {
+        return is_array($item) ? $item['folder'] : $item;
     }
 
     protected function initFinder(string $searchFolderPath, string|array $item): Finder
@@ -240,21 +245,7 @@ class Release
 
     protected function createFolder(string $path): bool
     {
-        $result = FALSE;
-
-        if (is_dir($path)) {
-            $result = TRUE;
-        } else {
-            try {
-                $result = mkdir($path, 0755, TRUE);
-            } catch (Exception $e) {
-                $this->renderError($e->getMessage());
-            }
-        }
-
-//        $this->renderResult(sprintf('Create folder %s', $path), $result);
-
-        return $result;
+        return is_dir($path) ? TRUE : mkdir($path, 0755, TRUE);
     }
 
     /**
@@ -265,46 +256,23 @@ class Release
      */
     protected function deleteFolder(string $path): bool
     {
-        $result = FALSE;
-
         if (is_dir($path)) {
-            try {
-                $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+            $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
 
-                foreach ($files as $file) {
-                    if ($file->isDir()) {
-                        rmdir($file->getPathName());
-                    } else {
-                        if (($file->isFile() || $file->isLink())) {
-                            unlink($file->getPathname());
-                        }
+            foreach ($files as $file) {
+                if ($file->isDir()) {
+                    rmdir($file->getPathName());
+                } else {
+                    if (($file->isFile() || $file->isLink())) {
+                        @unlink($file->getPathname()) or throw new Exception(sprintf('Resource temporarily unavailable: %s', $file->getPathname()));
                     }
                 }
-
-                $result = rmdir($path);
-            } catch (Exception $e) {
-                $this->renderError($e->getMessage());
             }
+
+            return rmdir($path);
         }
 
-//        $this->renderResult(sprintf('Delete folder %s', $path), $result);
-
-        return $result;
-    }
-
-    protected function copyFile(string $source, string $destination): bool
-    {
-        $result = FALSE;
-
-        try {
-            $result = copy($source, $destination);
-        } catch (Exception $e) {
-            $this->renderError($e->getMessage());
-        }
-
-//        $this->renderResult(sprintf('Copy file %s to %s', $source, $destination), $result);
-
-        return $result;
+        return FALSE;
     }
 
     protected function sourcePath(string $relativePath): string
