@@ -7,7 +7,7 @@ use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use Symfony\Component\Finder\Finder;
 use ZipArchive;
-use function Termwind\{render, ask};
+use function Termwind\{render, ask, terminal};
 
 class Release
 {
@@ -17,9 +17,11 @@ class Release
     protected $sourceFolderPath;
     protected $targetFolderPath;
     protected $config;
+    protected $zip;
 
     public function __construct()
     {
+        terminal()->clear();
         $this->renderHeader();
         $this->sourceFolderPath = getcwd();
         $configFilePath = $this->sourcePath(static::CONFIG_FILE_NAME);
@@ -41,21 +43,26 @@ class Release
             exit;
         }
 
+        $this->renderVar('Number of tasks', count($this->config['tasks']));
+
         if (!isset($this->config['zip']) || $this->config['zip'] == '') {
             $this->renderError('Application zip file name should be specified.');
             exit;
         }
 
-        $this->renderVar('Number of tasks', count($this->config['tasks']));
+        $this->zip = new ZipArchive;
+        $this->zip->open($this->targetPath($this->config['zip']), ZipArchive::CREATE);
 
 //        $a = $this->renderQuestion('Do you need FTP?');
-
 //        $this->renderVar('FTP', $a);
 
-        $this->prepare();
-        $this->copy();
+        $this->deleteFolder($this->targetFolderPath);
+        $this->createFolder($this->targetFolderPath);
 
-        return $this;
+        $this->run();
+
+        $this->renderResult(sprintf('Full zip %s, %d files', $this->targetPath($this->config['zip']), $this->zip->count()), $this->zip->close());
+        $this->renderText('Release completed.');
     }
 
     protected function renderHeader(): void
@@ -114,82 +121,124 @@ class Release
         HTML);
     }
 
-    protected function prepare(): void
+    protected function processDeleteTask(array $task): void
     {
-        $this->deleteFolder($this->targetFolderPath);
-        $this->createFolder($this->targetFolderPath);
-    }
+        foreach ($task['items'] as $item) {
+            $searchFolderPath = $this->sourcePath(is_array($item) ? $item['folder'] : $item);
 
-    protected function copy(): void
-    {
-        $fullZipArchive = new ZipArchive;
-        $fullZipArchive->open($this->targetPath($this->config['zip']), ZipArchive::CREATE);
+            foreach (iterator_to_array($this->initFinder($searchFolderPath, $item)) as $matchedItem) {
+                $path = $matchedItem->getRealPath();
 
-        foreach ($this->config['tasks'] as $i => $config) {
-            $baseTargetFolderPath = $this->targetPath($config['target']);
-            $this->createFolder($baseTargetFolderPath);
-
-            $itemZipArchive = new ZipArchive;
-            $itemZipFilePath = $this->targetPath($config['zip']);
-            $itemZipArchive->open($itemZipFilePath, ZipArchive::CREATE);
-
-            foreach ($config['map'] as $item) {
-                $searchFolderPath = $this->sourcePath(is_array($item) ? $item['folder'] : $item);
-
-                $finder = (new Finder)->in($searchFolderPath)->ignoreDotFiles(FALSE);
-
-                if (is_array($item)) {
-                    if (isset($item['files']) && $item['files'] === FALSE) {
-                        $finder->directories();
-                    } else {
-                        $finder->files();
-                    }
-
-                    if (isset($item['name'])) {
-                        $finder->name($item['name']);
-                    }
-                    if (isset($item['depth'])) {
-                        $finder->depth($item['depth']);
-                    }
-                    if (isset($item['exclude'])) {
-                        $finder->exclude($item['exclude']);
-                    }
-                }
-
-                foreach ($finder as $matchedItem) {
-//                    $this->renderText(sprintf('Matched item: %s', $matchedItem->getRealPath()));
-
-                    $matchedItemTempPath = str_replace($this->sourceFolderPath, $baseTargetFolderPath, $matchedItem->getRealPath());
-                    $zipRealPath = trim(str_replace($baseTargetFolderPath, '', $matchedItemTempPath), DIRECTORY_SEPARATOR);
-
-                    // if the found item is a folder
-                    if (is_dir($matchedItem->getRealPath())) {
-                        $this->createFolder($matchedItemTempPath);
-//                        $this->renderText(sprintf('Add folder to full zip archive: %s', $zipRealPath));
-
-                        $fullZipArchive && $fullZipArchive->addEmptyDir($zipRealPath);
-                        $itemZipArchive && $itemZipArchive->addEmptyDir($zipRealPath);
-                    } else {
-                        $matchedFileTempFolderPath = substr($matchedItemTempPath, 0, strrpos($matchedItemTempPath, $matchedItem->getFilename()) - 1);
-                        $this->createFolder($matchedFileTempFolderPath);
-
-                        // copy file to the temp folder
-                        $this->copyFile($matchedItem->getRealPath(), $matchedItemTempPath);
-
-                        // zip file to the full archive
-                        $fullZipArchive->addFile($matchedItem->getRealPath(), $zipRealPath);
-                        $itemZipArchive->addFile($matchedItem->getRealPath(), $zipRealPath);
-                    }
+                if (is_dir($path)) {
+                    $this->deleteFolder($path);
+                } elseif (is_file($path) || is_link($path)) {
+                    unlink($path);
                 }
             }
-
-            $this->renderResult(sprintf('Task %d, zip %s, %d files', ++$i, $itemZipFilePath, $itemZipArchive->count()), $itemZipArchive->close());
         }
-
-        $this->renderResult(sprintf('Full zip %s, %d files', $this->targetPath($this->config['zip']), $fullZipArchive->count()), $fullZipArchive->close());
     }
 
-    public function createFolder(string $path): bool
+    protected function processCommandTask2(array $task): void
+    {
+        foreach ($task['items'] as $item) {
+            // run command
+            $output = `$item`;
+        }
+    }
+
+    protected function processMkdirTask(array $task): void
+    {
+        foreach ($task['items'] as $item) {
+            $this->createFolder($this->targetPath($item));
+        }
+    }
+
+    protected function processCopyTask2(array $task): void
+    {
+        $baseTargetFolderPath = $this->targetPath($task['target']);
+        $this->createFolder($baseTargetFolderPath);
+
+        $itemZipArchive = new ZipArchive;
+        $itemZipFilePath = $this->targetPath($task['zip']);
+        $itemZipArchive->open($itemZipFilePath, ZipArchive::CREATE);
+
+        foreach ($task['items'] as $item) {
+            $searchFolderPath = $this->sourcePath(is_array($item) ? $item['folder'] : $item);
+
+            foreach ($this->initFinder($searchFolderPath, $item) as $matchedItem) {
+//                    $this->renderText(sprintf('Matched item: %s', $matchedItem->getRealPath()));
+
+                $matchedItemTempPath = str_replace($this->sourceFolderPath, $baseTargetFolderPath, $matchedItem->getRealPath());
+                $zipRealPath = trim(str_replace($baseTargetFolderPath, '', $matchedItemTempPath), DIRECTORY_SEPARATOR);
+
+                // if the found item is a folder
+                if (is_dir($matchedItem->getRealPath())) {
+                    $this->createFolder($matchedItemTempPath);
+//                        $this->renderText(sprintf('Add folder to full zip archive: %s', $zipRealPath));
+
+                    $this->zip->addEmptyDir($zipRealPath);
+                    $itemZipArchive->addEmptyDir($zipRealPath);
+                } else {
+                    $matchedFileTempFolderPath = substr($matchedItemTempPath, 0, strrpos($matchedItemTempPath, $matchedItem->getFilename()) - 1);
+                    $this->createFolder($matchedFileTempFolderPath);
+
+                    // copy file to the temp folder
+                    $this->copyFile($matchedItem->getRealPath(), $matchedItemTempPath);
+
+                    // zip file to the full archive
+                    $this->zip->addFile($matchedItem->getRealPath(), $zipRealPath);
+                    $itemZipArchive->addFile($matchedItem->getRealPath(), $zipRealPath);
+                }
+            }
+        }
+
+        $itemZipArchive->close();
+    }
+
+    protected function run(): void
+    {
+        foreach ($this->config['tasks'] as $i => $task) {
+            $methodName = sprintf('process%sTask', ucfirst($this->getTaskType($task)));
+
+            if (method_exists($this, $methodName)) {
+                $this->$methodName($task);
+            }
+
+            $this->renderResult(sprintf('Task #%d (%s)', ++$i, $this->getTaskType($task)), method_exists($this, $methodName));
+        }
+    }
+
+    protected function getTaskType(array $task): string
+    {
+        return $task['type'] ?? 'copy';
+    }
+
+    protected function initFinder(string $searchFolderPath, string|array $item): Finder
+    {
+        $finder = (new Finder)->in($searchFolderPath)->ignoreDotFiles(FALSE);
+
+        if (is_array($item)) {
+            if (isset($item['files']) && $item['files'] === FALSE) {
+                $finder->directories();
+            } else {
+                $finder->files();
+            }
+
+            if (isset($item['name'])) {
+                $finder->name($item['name']);
+            }
+            if (isset($item['depth'])) {
+                $finder->depth($item['depth']);
+            }
+            if (isset($item['exclude'])) {
+                $finder->exclude($item['exclude']);
+            }
+        }
+
+        return $finder;
+    }
+
+    protected function createFolder(string $path): bool
     {
         $result = FALSE;
 
