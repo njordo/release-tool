@@ -17,7 +17,6 @@ class Release
     protected $sourceFolderPath;
     protected $targetFolderPath;
     protected $config;
-    protected $zip;
 
     public function __construct()
     {
@@ -45,14 +44,6 @@ class Release
 
         $this->renderVar('Number of tasks', count($this->config['tasks']));
 
-        if (!isset($this->config['zip']) || $this->config['zip'] == '') {
-            $this->renderError('Application zip file name should be specified.');
-            exit;
-        }
-
-        $this->zip = new ZipArchive;
-        $this->zip->open($this->targetPath($this->config['zip']), ZipArchive::CREATE);
-
 //        $a = $this->renderQuestion('Do you need FTP?');
 //        $this->renderVar('FTP', $a);
 
@@ -66,7 +57,6 @@ class Release
 
         $this->run();
 
-        $this->renderResult(sprintf('Full zip %s, %d files', $this->targetPath($this->config['zip']), $this->zip->count()), $this->zip->close());
         $this->renderText('Release completed.');
     }
 
@@ -146,7 +136,6 @@ class Release
     protected function processCommandTask(array $task): void
     {
         foreach ($task['items'] as $command) {
-            // run command
             $result = shell_exec($command);
 
             if (!$result) {
@@ -155,14 +144,14 @@ class Release
         }
     }
 
-    protected function processMkdirTask2(array $task): void
+    protected function processMkdirTask(array $task): void
     {
         foreach ($task['items'] as $item) {
             $this->createFolder($this->targetPath($item));
         }
     }
 
-    protected function processZipTask2(array $task): void
+    protected function processZipTask(array $task): void
     {
         $itemZipArchive = new ZipArchive;
         $itemZipFilePath = $this->targetPath($task['zip']);
@@ -175,13 +164,9 @@ class Release
             foreach ($this->initFinder($searchFolderPath, $item) as $matchedItem) {
                 $zipPath = $relativePath . DIRECTORY_SEPARATOR . $matchedItem->getRelativePathname();
 
-                // if the found item is a folder
                 if (is_dir($matchedItem->getRealPath())) {
-                    $this->zip->addEmptyDir($zipPath);
                     $itemZipArchive->addEmptyDir($zipPath);
                 } else {
-                    // zip file to the full archive
-                    $this->zip->addFile($matchedItem->getRealPath(), $zipPath);
                     $itemZipArchive->addFile($matchedItem->getRealPath(), $zipPath);
                 }
             }
@@ -231,6 +216,9 @@ class Release
 
             if (isset($item['name'])) {
                 $finder->name($item['name']);
+            }
+            if (isset($item['notName'])) {
+                $finder->notName($item['notName']);
             }
             if (isset($item['depth'])) {
                 $finder->depth($item['depth']);
