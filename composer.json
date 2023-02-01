@@ -1,0 +1,21 @@
+{
+    "name": "financialplugins/release-tool",
+    "description": "A tool that helps preparing product releases.",
+    "type": "library",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "Financialplugins\\ReleaseTool\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "h"
+        }
+    ],
+    "require": {
+        "symfony/finder": "^5.4",
+        "nunomaduro/termwind": "^1.15",
+        "ext-zip": "*"
+    }
+}
