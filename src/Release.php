@@ -84,15 +84,17 @@ class Release
     protected function processDeleteTask(array $task): void
     {
         foreach ($task['items'] as $item) {
-            $searchFolderPath = $this->sourcePath($this->getTaskItemFolder($item));
+            foreach ($this->getTaskItemFolder($item) as $folder) {
+                $searchFolderPath = $this->sourcePath($folder);
 
-            foreach (iterator_to_array($this->makeFinder($searchFolderPath, $item)) as $matchedItem) {
-                $path = $matchedItem->getRealPath();
+                foreach (iterator_to_array($this->makeFinder($searchFolderPath, $item)) as $matchedItem) {
+                    $path = $matchedItem->getRealPath();
 
-                if (is_dir($path)) {
-                    $this->deleteFolder($path);
-                } elseif (is_file($path) || is_link($path)) {
-                    unlink($path);
+                    if (is_dir($path)) {
+                        $this->deleteFolder($path);
+                    } elseif (is_file($path) || is_link($path)) {
+                        unlink($path);
+                    }
                 }
             }
         }
@@ -119,18 +121,19 @@ class Release
     protected function processCopyTask(array $task): void
     {
         foreach ($task['items'] as $item) {
-            $relativePath = $this->getTaskItemFolder($item);
-            $searchFolderPath = $this->sourcePath($relativePath);
+            foreach ($this->getTaskItemFolder($item) as $folder) {
+                $searchFolderPath = $this->sourcePath($folder);
 
-            foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
-                $destinationPath = $this->targetPath($relativePath . DIRECTORY_SEPARATOR . $match->getRelativePathname());
+                foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
+                    $destinationPath = $this->targetPath($folder . DIRECTORY_SEPARATOR . $match->getRelativePathname());
 
-                if (is_dir($match->getRealPath())) {
-                    $this->createFolder($destinationPath);
-                } else {
-                    $fileFolderFolderPath = substr($destinationPath, 0, strrpos($destinationPath, $match->getFilename()) - 1);
-                    $this->createFolder($fileFolderFolderPath);
-                    copy($match->getRealPath(), $destinationPath);
+                    if (is_dir($match->getRealPath())) {
+                        $this->createFolder($destinationPath);
+                    } else {
+                        $fileFolderFolderPath = substr($destinationPath, 0, strrpos($destinationPath, $match->getFilename()) - 1);
+                        $this->createFolder($fileFolderFolderPath);
+                        copy($match->getRealPath(), $destinationPath);
+                    }
                 }
             }
         }
@@ -143,20 +146,21 @@ class Release
         $itemZipArchive->open($itemZipFilePath, ZipArchive::CREATE);
 
         foreach ($task['items'] as $item) {
-            $relativePath = $this->getTaskItemFolder($item);
-            $searchFolderPath = $this->sourcePath($relativePath);
+            foreach ($this->getTaskItemFolder($item) as $folder) {
+                $searchFolderPath = $this->sourcePath($folder);
 
-            foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
-                $zipPath = $relativePath . DIRECTORY_SEPARATOR . $match->getRelativePathname();
+                foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
+                    $zipPath = $folder . DIRECTORY_SEPARATOR . $match->getRelativePathname();
 
-                if (is_dir($match->getRealPath())) {
-                    $itemZipArchive->addEmptyDir($zipPath);
-                } else {
-                    if (isset($item['filters'])) {
-                        $filteredContents = $this->filter($match, $item['filters']);
-                        $itemZipArchive->addFromString($zipPath, $filteredContents);
+                    if (is_dir($match->getRealPath())) {
+                        $itemZipArchive->addEmptyDir($zipPath);
                     } else {
-                        $itemZipArchive->addFile($match->getRealPath(), $zipPath);
+                        if (isset($item['filters'])) {
+                            $filteredContents = $this->filter($match, $item['filters']);
+                            $itemZipArchive->addFromString($zipPath, $filteredContents);
+                        } else {
+                            $itemZipArchive->addFile($match->getRealPath(), $zipPath);
+                        }
                     }
                 }
             }
@@ -271,9 +275,10 @@ class Release
         return $task['type'] ?? 'zip';
     }
 
-    protected function getTaskItemFolder(string|array $item): string
+    protected function getTaskItemFolder(string|array $item): array
     {
-        return is_array($item) ? $item['folder'] : $item;
+        $folder = is_array($item) ? $item['folder'] : $item;
+        return is_array($folder) ? $folder : [$folder];
     }
 
     protected function makeFinder(string $searchFolderPath, string|array $item): Finder
