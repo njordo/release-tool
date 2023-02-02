@@ -6,6 +6,7 @@ use Exception;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use Symfony\Component\Finder\Finder;
+use Symfony\Component\Finder\SplFileInfo;
 use ZipArchive;
 use function Termwind\{render, ask, terminal};
 
@@ -21,28 +22,26 @@ class Release
     public function __construct()
     {
         terminal()->clear();
-        $this->renderHeader();
+        $this->printHeader();
         $this->sourceFolderPath = getcwd();
         $configFilePath = $this->sourcePath(static::CONFIG_FILE_NAME);
 
-        $this->renderVar('Source folder', $this->sourceFolderPath);
+        $this->printVar('Source folder', $this->sourceFolderPath);
 
         if (!file_exists($configFilePath)) {
-            $this->renderError(sprintf('release.json file not found in %s', $this->sourceFolderPath));
-            exit;
+            $this->printErrorAndExit(sprintf('release.json file not found in %s', $this->sourceFolderPath));
         }
 
         $this->config = json_decode(file_get_contents($configFilePath), JSON_OBJECT_AS_ARRAY);
         $this->targetFolderPath = $this->sourcePath(static::TARGET_FOLDER_NAME);
 
-        $this->renderVar('Target folder', $this->targetFolderPath);
+        $this->printVar('Target folder', $this->targetFolderPath);
 
         if ($this->sourceFolderPath == $this->targetFolderPath) {
-            $this->renderError(sprintf('Check the target path, it can not be the same as the source path: %s', $this->sourceFolderPath));
-            exit;
+            $this->printErrorAndExit(sprintf('Check the target path, it can not be the same as the source path: %s', $this->sourceFolderPath));
         }
 
-        $this->renderVar('Number of tasks', count($this->config['tasks']));
+        $this->printVar('Number of tasks', count($this->config['tasks']));
 
 //        $a = $this->renderQuestion('Do you need FTP?');
 //        $this->renderVar('FTP', $a);
@@ -51,77 +50,37 @@ class Release
             $this->deleteFolder($this->targetFolderPath);
             $this->createFolder($this->targetFolderPath);
         } catch (Exception $e) {
-            $this->renderError($e->getMessage());
-            exit;
+            $this->printErrorAndExit($e->getMessage());
         }
 
-        $this->run();
+        $this->process();
 
-        $this->renderText('Release completed.');
+        $this->printString('Release completed.');
     }
 
-    protected function renderHeader(): void
+    protected function process(): void
     {
-        render(<<<HTML
-          <div class="bg-blue-500 text-blue px-2 uppercase">Release Tool</div>
-        HTML);
-    }
+        foreach ($this->config['tasks'] as $i => $task) {
+            $methodName = sprintf('process%sTask', ucfirst($this->getTaskType($task)));
 
-    protected function renderError(string $message): void
-    {
-        render(<<<HTML
-          <div>
-            <span class="bg-red-500 text-red px-1 mr-1">Error</span>
-            <span class="text-red">$message</span>
-          </div>
-        HTML);
-    }
-
-    protected function renderVar(string $name, ?string $value): void
-    {
-        render(<<<HTML
-          <div>
-            <span class="text-gray-900 mr-1">$name:</span>
-            <span class="text-blue">$value</span>
-          </div>
-        HTML);
-    }
-
-    protected function renderQuestion(string $question): mixed
-    {
-        return ask(<<<HTML
-          <div>
-            <span class="font-bold mr-1">Question:</span>
-            <span class="italic mr-1">$question</span>
-          </div>
-        HTML);
-    }
-
-    protected function renderResult(string $title, bool $success): void
-    {
-        $result = $success ? "<span class=\"text-green uppercase font-bold\">Ok</span>" : "<span class=\"text-red uppercase font-bold\">Error</span>";
-
-        render(<<<HTML
-          <div>
-            <span class="text-gray-200 mr-1">$title</span>
-            $result
-          </div>
-        HTML);
-    }
-
-    protected function renderText(string $string): void
-    {
-        render(<<<HTML
-          <span class="text-gray-200 mr-1">$string</span>
-        HTML);
+            if (method_exists($this, $methodName)) {
+                try {
+                    $this->$methodName($task);
+                    $this->printStatus(sprintf('Task #%d (%s)', ++$i, $this->getTaskType($task)), TRUE);
+                } catch (Exception $e) {
+                    $this->printStatus(sprintf('Task #%d (%s)', ++$i, $this->getTaskType($task)), FALSE);
+                    $this->printErrorAndExit($e->getMessage());
+                }
+            }
+        }
     }
 
     protected function processDeleteTask(array $task): void
     {
         foreach ($task['items'] as $item) {
-            $searchFolderPath = $this->sourcePath($this->getItemFolder($item));
+            $searchFolderPath = $this->sourcePath($this->getTaskItemFolder($item));
 
-            foreach (iterator_to_array($this->initFinder($searchFolderPath, $item)) as $matchedItem) {
+            foreach (iterator_to_array($this->makeFinder($searchFolderPath, $item)) as $matchedItem) {
                 $path = $matchedItem->getRealPath();
 
                 if (is_dir($path)) {
@@ -158,16 +117,21 @@ class Release
         $itemZipArchive->open($itemZipFilePath, ZipArchive::CREATE);
 
         foreach ($task['items'] as $item) {
-            $relativePath = $this->getItemFolder($item);
+            $relativePath = $this->getTaskItemFolder($item);
             $searchFolderPath = $this->sourcePath($relativePath);
 
-            foreach ($this->initFinder($searchFolderPath, $item) as $matchedItem) {
-                $zipPath = $relativePath . DIRECTORY_SEPARATOR . $matchedItem->getRelativePathname();
+            foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
+                $zipPath = $relativePath . DIRECTORY_SEPARATOR . $match->getRelativePathname();
 
-                if (is_dir($matchedItem->getRealPath())) {
+                if (is_dir($match->getRealPath())) {
                     $itemZipArchive->addEmptyDir($zipPath);
                 } else {
-                    $itemZipArchive->addFile($matchedItem->getRealPath(), $zipPath);
+                    if (isset($item['filters'])) {
+                        $filteredContents = $this->filter($match, $item['filters']);
+                        $itemZipArchive->addFromString($zipPath, $filteredContents);
+                    } else {
+                        $itemZipArchive->addFile($match->getRealPath(), $zipPath);
+                    }
                 }
             }
         }
@@ -175,22 +139,45 @@ class Release
         $itemZipArchive->close();
     }
 
-    protected function run(): void
+    protected function filter(SplFileInfo $file, array $filters): string
     {
-        foreach ($this->config['tasks'] as $i => $task) {
-            $methodName = sprintf('process%sTask', ucfirst($this->getTaskType($task)));
+        $contents = $file->getContents();
 
-            if (method_exists($this, $methodName)) {
-                try {
-                    $this->$methodName($task);
-                    $this->renderResult(sprintf('Task #%d (%s)', ++$i, $this->getTaskType($task)), TRUE);
-                } catch (Exception $e) {
-                    $this->renderError($e->getMessage());
-                    $this->renderResult(sprintf('Task #%d (%s)', ++$i, $this->getTaskType($task)), FALSE);
-                    exit;
-                }
+        foreach ($filters as $filter) {
+            $method = 'filter' . ucfirst(is_string($filter) ? $filter : $filter['type']);
+
+            if (method_exists($this, $method)) {
+                $contents = $this->$method($file, $contents, $filter);
             }
         }
+
+        return $contents;
+    }
+
+    protected function filterRemoveComments(SplFileInfo $file, string $contents, string|array $filter): string
+    {
+        if ($file->getExtension() == 'php') {
+            $result = '';
+            $tokens = token_get_all($contents);
+
+            foreach ($tokens as $token) {
+                if (is_array($token)) {
+                    list($id, $text) = $token;
+
+                    if (in_array($id, [T_COMMENT, T_DOC_COMMENT])) {
+                        continue;
+                    }
+
+                    $token = $text;
+                }
+
+                $result .= $token;
+            }
+
+            $contents = $result;
+        }
+
+        return $contents;
     }
 
     protected function getTaskType(array $task): string
@@ -198,12 +185,12 @@ class Release
         return $task['type'] ?? 'zip';
     }
 
-    protected function getItemFolder(string|array $item): string
+    protected function getTaskItemFolder(string|array $item): string
     {
         return is_array($item) ? $item['folder'] : $item;
     }
 
-    protected function initFinder(string $searchFolderPath, string|array $item): Finder
+    protected function makeFinder(string $searchFolderPath, string|array $item): Finder
     {
         $finder = (new Finder)->in($searchFolderPath)->ignoreDotFiles(FALSE);
 
@@ -214,17 +201,10 @@ class Release
                 $finder->files();
             }
 
-            if (isset($item['name'])) {
-                $finder->name($item['name']);
-            }
-            if (isset($item['notName'])) {
-                $finder->notName($item['notName']);
-            }
-            if (isset($item['depth'])) {
-                $finder->depth($item['depth']);
-            }
-            if (isset($item['exclude'])) {
-                $finder->exclude($item['exclude']);
+            foreach (['name', 'notName', 'depth', 'exclude'] as $method) {
+                if (isset($item[$method])) {
+                    $finder->$method($item[$method]);
+                }
             }
         }
 
@@ -271,5 +251,67 @@ class Release
     protected function targetPath(string $relativePath): string
     {
         return trim($this->targetFolderPath . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativePath), DIRECTORY_SEPARATOR);
+    }
+
+    protected function printHeader(): void
+    {
+        render(<<<HTML
+          <div class="bg-blue-500 text-blue px-2 uppercase">Release Tool</div>
+        HTML);
+    }
+
+    protected function printError(string $message): void
+    {
+        render(<<<HTML
+          <div>
+            <span class="bg-red-500 text-red px-1 mr-1">Error</span>
+            <span class="text-red">$message</span>
+          </div>
+        HTML);
+    }
+
+    protected function printErrorAndExit(string $message): void
+    {
+        $this->printError($message);
+        exit;
+    }
+
+    protected function printVar(string $name, ?string $value): void
+    {
+        render(<<<HTML
+          <div>
+            <span class="text-gray-900 mr-1">$name:</span>
+            <span class="text-blue">$value</span>
+          </div>
+        HTML);
+    }
+
+    protected function printQuestion(string $question): mixed
+    {
+        return ask(<<<HTML
+          <div>
+            <span class="font-bold mr-1">Question:</span>
+            <span class="italic mr-1">$question</span>
+          </div>
+        HTML);
+    }
+
+    protected function printStatus(string $title, bool $success): void
+    {
+        $result = $success ? "<span class=\"text-green uppercase font-bold\">Ok</span>" : "<span class=\"text-red uppercase font-bold\">Error</span>";
+
+        render(<<<HTML
+          <div>
+            <span class="text-gray-200 mr-1">$title</span>
+            $result
+          </div>
+        HTML);
+    }
+
+    protected function printString(string $string): void
+    {
+        render(<<<HTML
+          <span class="text-gray-200 mr-1">$string</span>
+        HTML);
     }
 }
