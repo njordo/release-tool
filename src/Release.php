@@ -116,6 +116,26 @@ class Release
         }
     }
 
+    protected function processCopyTask(array $task): void
+    {
+        foreach ($task['items'] as $item) {
+            $relativePath = $this->getTaskItemFolder($item);
+            $searchFolderPath = $this->sourcePath($relativePath);
+
+            foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
+                $destinationPath = $this->targetPath($relativePath . DIRECTORY_SEPARATOR . $match->getRelativePathname());
+
+                if (is_dir($match->getRealPath())) {
+                    $this->createFolder($destinationPath);
+                } else {
+                    $fileFolderFolderPath = substr($destinationPath, 0, strrpos($destinationPath, $match->getFilename()) - 1);
+                    $this->createFolder($fileFolderFolderPath);
+                    copy($match->getRealPath(), $destinationPath);
+                }
+            }
+        }
+    }
+
     protected function processZipTask(array $task): void
     {
         $itemZipArchive = new ZipArchive;
@@ -218,6 +238,30 @@ class Release
                 $contents
             );
         }
+
+        return $contents;
+    }
+
+    protected function filterReplace(SplFileInfo $file, string $contents, string|array $filter): string
+    {
+        if (!isset($filter['search']) || !isset($filter['replace'])) {
+            return $contents;
+        }
+
+        if (preg_match('#EXEC\((.+)\)#', $filter['replace'], $m)) {
+            $filter['replace'] = str_replace($m[0], eval($m[1]), $filter['replace']);
+        }
+
+        return str_replace($filter['search'], $filter['replace'], $contents);
+    }
+
+    protected function filterExec(SplFileInfo $file, string $contents, string|array $filter): string
+    {
+        if (!isset($filter['code'])) {
+            return $contents;
+        }
+
+        eval($filter['code']);
 
         return $contents;
     }
