@@ -13,10 +13,12 @@ use function Termwind\{render, ask, terminal};
 class Release
 {
     protected const CONFIG_FILE_NAME = 'release.json';
+    protected const COMPOSER_FILE_NAME = 'composer.json';
     protected const TARGET_FOLDER_NAME = 'release';
 
     protected $sourceFolderPath;
     protected $targetFolderPath;
+    protected $composer;
     protected $config;
 
     public function __construct()
@@ -24,23 +26,27 @@ class Release
         terminal()->clear();
         $this->printHeader();
         $this->sourceFolderPath = getcwd();
-        $configFilePath = $this->sourcePath(static::CONFIG_FILE_NAME);
-
-        $this->printVar('Source folder', $this->sourceFolderPath);
-
-        if (!file_exists($configFilePath)) {
-            $this->printErrorAndExit(sprintf('release.json file not found in %s', $this->sourceFolderPath));
-        }
-
-        $this->config = json_decode(file_get_contents($configFilePath), JSON_OBJECT_AS_ARRAY);
         $this->targetFolderPath = $this->sourcePath(static::TARGET_FOLDER_NAME);
-
-        $this->printVar('Target folder', $this->targetFolderPath);
+        $configFilePath = $this->sourcePath(static::CONFIG_FILE_NAME);
+        $composerFilePath = $this->sourcePath(static::COMPOSER_FILE_NAME);
 
         if ($this->sourceFolderPath == $this->targetFolderPath) {
             $this->printErrorAndExit(sprintf('Check the target path, it can not be the same as the source path: %s', $this->sourceFolderPath));
         }
 
+        if (!file_exists($composerFilePath)) {
+            $this->printErrorAndExit(sprintf('%s file not found in %s', static::COMPOSER_FILE_NAME, $this->sourceFolderPath));
+        }
+
+        if (!file_exists($configFilePath)) {
+            $this->printErrorAndExit(sprintf('%s file not found in %s', static::CONFIG_FILE_NAME, $this->sourceFolderPath));
+        }
+
+        $this->composer = json_decode(file_get_contents($composerFilePath));
+        $this->config = json_decode(file_get_contents($configFilePath), JSON_OBJECT_AS_ARRAY);
+
+        $this->printVar('Source folder', $this->sourceFolderPath);
+        $this->printVar('Target folder', $this->targetFolderPath);
         $this->printVar('Number of tasks', count($this->config['tasks']));
 
 //        $a = $this->renderQuestion('Do you need FTP?');
@@ -175,6 +181,42 @@ class Release
             }
 
             $contents = $result;
+        }
+
+        return $contents;
+    }
+
+    protected function filterAddCopyright(SplFileInfo $file, string $contents, string|array $filter): string
+    {
+        if ($file->getExtension() == 'php') {
+            $copyright = <<<TEXT
+                <?php
+                /**
+                 *   %s
+                 *   ----------------------
+                 *   %s
+                 * 
+                 *   @copyright  Copyright (c) %s, All rights reserved
+                 *   @author     %s <%s>
+                 *   @see        %s
+                */
+                TEXT;
+
+            $author = $this->composer->authors[0] ?? [];
+
+            $contents = str_replace(
+                '<?php',
+                sprintf(
+                    $copyright,
+                    $this->composer->description ?? '',
+                    $file->getFilename(),
+                    $author->name ?? '',
+                    $author->name ?? '',
+                    $author->email ?? '',
+                    $author->homepage ?? '',
+                ),
+                $contents
+            );
         }
 
         return $contents;
