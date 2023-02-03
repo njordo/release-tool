@@ -11,6 +11,7 @@
     "require": {
         "symfony/finder": "^5.4",
         "nunomaduro/termwind": "^1.15",
-        "ext-zip": "*"
+        "ext-zip": "*",
+        "ext-simplexml": "*"
     }
 }

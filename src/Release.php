@@ -5,6 +5,7 @@ namespace Financialplugins\ReleaseTool;
 use Exception;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
+use SimpleXMLElement;
 use Symfony\Component\Finder\Finder;
 use Symfony\Component\Finder\SplFileInfo;
 use ZipArchive;
@@ -14,12 +15,14 @@ class Release
 {
     protected const CONFIG_FILE_NAME = 'release.json';
     protected const COMPOSER_FILE_NAME = 'composer.json';
+    protected const SERVERS_FILE_NAME = '.idea/WebServers.xml';
     protected const TARGET_FOLDER_NAME = 'release';
 
     protected $sourceFolderPath;
     protected $targetFolderPath;
     protected $composer;
     protected $config;
+    protected $servers;
 
     public function __construct()
     {
@@ -27,26 +30,26 @@ class Release
         $this->printHeader();
         $this->sourceFolderPath = getcwd();
         $this->targetFolderPath = $this->sourcePath(static::TARGET_FOLDER_NAME);
-        $configFilePath = $this->sourcePath(static::CONFIG_FILE_NAME);
-        $composerFilePath = $this->sourcePath(static::COMPOSER_FILE_NAME);
 
         if ($this->sourceFolderPath == $this->targetFolderPath) {
             $this->printErrorAndExit(sprintf('Check the target path, it can not be the same as the source path: %s', $this->sourceFolderPath));
         }
 
-        if (!file_exists($composerFilePath)) {
-            $this->printErrorAndExit(sprintf('%s file not found in %s', static::COMPOSER_FILE_NAME, $this->sourceFolderPath));
+        foreach ([static::CONFIG_FILE_NAME, static::COMPOSER_FILE_NAME, static::SERVERS_FILE_NAME] as $fileName) {
+            $filePath = $this->sourcePath($fileName);
+
+            if (!file_exists($filePath)) {
+                $this->printErrorAndExit(sprintf('%s file not found in %s', $fileName, $this->sourceFolderPath));
+            }
         }
 
-        if (!file_exists($configFilePath)) {
-            $this->printErrorAndExit(sprintf('%s file not found in %s', static::CONFIG_FILE_NAME, $this->sourceFolderPath));
-        }
-
-        $this->composer = json_decode(file_get_contents($composerFilePath));
-        $this->config = json_decode(file_get_contents($configFilePath), JSON_OBJECT_AS_ARRAY);
+        $this->composer = json_decode(file_get_contents($this->sourcePath(static::COMPOSER_FILE_NAME)));
+        $this->config = json_decode(file_get_contents($this->sourcePath(static::CONFIG_FILE_NAME)), JSON_OBJECT_AS_ARRAY);
+        $this->servers = $this->mapWebservers(simplexml_load_file($this->sourcePath(static::SERVERS_FILE_NAME)));
 
         $this->printVar('Source folder', $this->sourceFolderPath);
         $this->printVar('Target folder', $this->targetFolderPath);
+        $this->printVar('Number of servers', count($this->servers));
         $this->printVar('Number of tasks', count($this->config['tasks']));
 
 //        $a = $this->renderQuestion('Do you need FTP?');
@@ -348,7 +351,8 @@ class Release
     {
         render(<<<HTML
           <div class="bg-blue-500 text-blue px-2 uppercase">Release Tool</div>
-        HTML);
+        HTML
+        );
     }
 
     protected function printError(string $message): void
@@ -358,7 +362,8 @@ class Release
             <span class="bg-red-500 text-red px-1 mr-1">Error</span>
             <span class="text-red">$message</span>
           </div>
-        HTML);
+        HTML
+        );
     }
 
     protected function printErrorAndExit(string $message): void
@@ -374,7 +379,8 @@ class Release
             <span class="text-gray-900 mr-1">$name:</span>
             <span class="text-blue">$value</span>
           </div>
-        HTML);
+        HTML
+        );
     }
 
     protected function printQuestion(string $question): mixed
@@ -384,7 +390,8 @@ class Release
             <span class="font-bold mr-1">Question:</span>
             <span class="italic mr-1">$question</span>
           </div>
-        HTML);
+        HTML
+        );
     }
 
     protected function printStatus(string $title, bool $success): void
@@ -396,13 +403,33 @@ class Release
             <span class="text-gray-200 mr-1">$title</span>
             $result
           </div>
-        HTML);
+        HTML
+        );
     }
 
     protected function printString(string $string): void
     {
         render(<<<HTML
           <span class="text-gray-200 mr-1">$string</span>
-        HTML);
+        HTML
+        );
+    }
+
+    protected function mapWebservers(SimpleXMLElement $xml): array
+    {
+        $result = [];
+
+        foreach ($xml->component->option->webServer as $server) {
+            $name = (string) $server->attributes()->name;
+
+            $result[$name] = (object) [
+                'host' => (string) $server->fileTransfer->attributes()->host,
+                'port' => (string) $server->fileTransfer->attributes()->port,
+                'rootFolder' => (string) $server->fileTransfer->attributes()->rootFolder,
+                'accessType' => (string) $server->fileTransfer->attributes()->accessType,
+            ];
+        }
+
+        return $result;
     }
 }
