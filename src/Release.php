@@ -128,7 +128,7 @@ class Release
                 $searchFolderPath = $this->sourcePath($folder);
 
                 foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
-                    $destinationPath = $this->targetPath($folder . DIRECTORY_SEPARATOR . $match->getRelativePathname());
+                    $destinationPath = $this->targetPath($folder . '/' . $match->getRelativePathname());
 
                     if (is_dir($match->getRealPath())) {
                         $this->createFolder($destinationPath);
@@ -153,7 +153,7 @@ class Release
                 $searchFolderPath = $this->sourcePath($folder);
 
                 foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
-                    $zipPath = $folder . DIRECTORY_SEPARATOR . $match->getRelativePathname();
+                    $zipPath = $folder . '/' . $this->path($match->getRelativePathname());
 
                     if (is_dir($match->getRealPath())) {
                         $itemZipArchive->addEmptyDir($zipPath);
@@ -337,14 +337,19 @@ class Release
         return FALSE;
     }
 
+    protected function path(string $path): string
+    {
+        return str_replace('\\', '/', $path);
+    }
+
     protected function sourcePath(string $relativePath): string
     {
-        return trim($this->sourceFolderPath . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativePath), DIRECTORY_SEPARATOR);
+        return trim($this->sourceFolderPath . '/' . $this->path($relativePath), '/');
     }
 
     protected function targetPath(string $relativePath): string
     {
-        return trim($this->targetFolderPath . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativePath), DIRECTORY_SEPARATOR);
+        return trim($this->targetFolderPath . '/' . $this->path($relativePath), '/');
     }
 
     protected function printHeader(): void
