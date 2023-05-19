@@ -72,6 +72,11 @@ class Release
         foreach ($this->config['tasks'] as $i => $task) {
             $methodName = sprintf('process%sTask', ucfirst($this->getTaskType($task)));
 
+            if (isset($task['skip'])) {
+                $this->printStatus(sprintf('Task #%d (%s)', ++$i, 'skipped'), TRUE);
+                continue;
+            }
+
             if (method_exists($this, $methodName)) {
                 try {
                     $this->$methodName($task);
