@@ -133,7 +133,9 @@ class Release
                 $searchFolderPath = $this->sourcePath($folder);
 
                 foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
-                    $destinationPath = $this->targetPath($folder . '/' . $match->getRelativePathname());
+                    $destinationPath = isset($item['destination'])
+                        ? $this->targetPath($item['destination'] . '/' . $match->getRelativePathname())
+                        : $this->targetPath($folder . '/' . $match->getRelativePathname());
 
                     if (is_dir($match->getRealPath())) {
                         $this->createFolder($destinationPath);
@@ -161,7 +163,10 @@ class Release
 
                 // loop through matched items (files or folders) in this folder
                 foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
-                    $zipPath = ($itemZipRoot ? $itemZipRoot . '/' : '') . ($folder ? $folder . '/' : '') . $this->path($match->getRelativePathname());
+                    $zipRootFolder = $itemZipRoot ? $itemZipRoot . '/' : '';
+                    $zipDestinationFolder = isset($item['destination']) ? $item['destination'] . '/' : ($folder ? $folder . '/' : '');
+
+                    $zipPath = $zipRootFolder . $zipDestinationFolder . $this->path($match->getRelativePathname());
 
                     if (is_dir($match->getRealPath())) {
                         $itemZipArchive->addEmptyDir($zipPath);
