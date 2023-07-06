@@ -152,13 +152,16 @@ class Release
         $itemZipArchive = new ZipArchive;
         $itemZipFilePath = $this->targetPath($task['zip']);
         $itemZipArchive->open($itemZipFilePath, ZipArchive::CREATE);
+        $itemZipRoot = $task['root'] ?? '';
 
         foreach ($task['items'] as $item) {
+            // loop through folders of each item
             foreach ($this->getTaskItemFolder($item) as $folder) {
                 $searchFolderPath = $this->sourcePath($folder);
 
+                // loop through matched items (files or folders) in this folder
                 foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
-                    $zipPath = $folder . '/' . $this->path($match->getRelativePathname());
+                    $zipPath = ($itemZipRoot ? $itemZipRoot . '/' : '') . ($folder ? $folder . '/' : '') . $this->path($match->getRelativePathname());
 
                     if (is_dir($match->getRealPath())) {
                         $itemZipArchive->addEmptyDir($zipPath);
