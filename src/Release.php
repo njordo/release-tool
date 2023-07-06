@@ -35,7 +35,7 @@ class Release
             $this->printErrorAndExit(sprintf('Check the target path, it can not be the same as the source path: %s', $this->sourceFolderPath));
         }
 
-        foreach ([static::CONFIG_FILE_NAME, static::COMPOSER_FILE_NAME, static::SERVERS_FILE_NAME] as $fileName) {
+        foreach ([static::CONFIG_FILE_NAME, static::COMPOSER_FILE_NAME/*, static::SERVERS_FILE_NAME*/] as $fileName) {
             $filePath = $this->sourcePath($fileName);
 
             if (!file_exists($filePath)) {
@@ -45,11 +45,11 @@ class Release
 
         $this->composer = json_decode(file_get_contents($this->sourcePath(static::COMPOSER_FILE_NAME)));
         $this->config = json_decode(file_get_contents($this->sourcePath(static::CONFIG_FILE_NAME)), JSON_OBJECT_AS_ARRAY);
-        $this->servers = $this->mapWebservers(simplexml_load_file($this->sourcePath(static::SERVERS_FILE_NAME)));
+//        $this->servers = $this->mapWebservers(simplexml_load_file($this->sourcePath(static::SERVERS_FILE_NAME)));
 
         $this->printVar('Source folder', $this->sourceFolderPath);
         $this->printVar('Target folder', $this->targetFolderPath);
-        $this->printVar('Number of servers', count($this->servers));
+//        $this->printVar('Number of servers', count($this->servers));
         $this->printVar('Number of tasks', count($this->config['tasks']));
 
 //        $a = $this->renderQuestion('Do you need FTP?');
