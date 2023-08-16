@@ -24,7 +24,9 @@ class Release
     protected $config;
     protected $servers;
 
-    public function __construct()
+    protected $taskIds;
+
+    public function __construct(array $argv)
     {
         terminal()->clear();
         $this->printHeader();
@@ -45,6 +47,7 @@ class Release
 
         $this->composer = json_decode(file_get_contents($this->sourcePath(static::COMPOSER_FILE_NAME)));
         $this->config = json_decode(file_get_contents($this->sourcePath(static::CONFIG_FILE_NAME)), JSON_OBJECT_AS_ARRAY);
+        $this->taskIds = array_slice($argv, 1);
 //        $this->servers = $this->mapWebservers(simplexml_load_file($this->sourcePath(static::SERVERS_FILE_NAME)));
 
         $this->printVar('Source folder', $this->sourceFolderPath);
@@ -72,7 +75,7 @@ class Release
         foreach ($this->config['tasks'] as $i => $task) {
             $methodName = sprintf('process%sTask', ucfirst($this->getTaskType($task)));
 
-            if (isset($task['skip'])) {
+            if (isset($task['skip']) || (!empty($this->taskIds) && (!isset($task['id']) || !in_array($task['id'], $this->taskIds)))) {
                 $this->printStatus(sprintf('Task #%d (%s)', ++$i, 'skipped'), TRUE);
                 continue;
             }
