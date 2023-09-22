@@ -275,7 +275,9 @@ class Release
             $filter['replace'] = str_replace($m[0], eval($m[1]), $filter['replace']);
         }
 
-        return str_replace($filter['search'], $filter['replace'], $contents);
+        return preg_match('/^#.*#$/', $filter['search'])
+            ? preg_replace($filter['search'] . 'm', $filter['replace'], $contents)
+            : str_replace($filter['search'], $filter['replace'], $contents);
     }
 
     protected function filterExec(SplFileInfo $file, string $contents, string|array $filter): string
