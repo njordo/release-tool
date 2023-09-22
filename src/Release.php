@@ -116,8 +116,8 @@ class Release
         foreach ($task['items'] as $command) {
             $result = shell_exec($command);
 
-            if (!$result) {
-                throw new Exception(sprintf('Command can not be completed: %s', $command));
+            if ($result === FALSE) {
+                $this->printErrorAndExit(sprintf('Command "%s" can not be completed, result: %s', $command, $result));
             }
         }
     }
