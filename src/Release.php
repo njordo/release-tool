@@ -236,7 +236,7 @@ class Release
                 <?php
                 /**
                  *   %s
-                 *   ----------------------
+                 *   %s
                  *   %s
                  * 
                  *   @copyright  Copyright (c) %s, All rights reserved
@@ -251,7 +251,8 @@ class Release
                 '<?php',
                 sprintf(
                     $copyright,
-                    $this->composer->description ?? '',
+                    $this->composer->description ?? $this->composer->name,
+                    str_repeat('-', strlen($this->composer->description ?? $this->composer->name)),
                     $file->getFilename(),
                     $author->name ?? '',
                     $author->name ?? '',
@@ -313,7 +314,7 @@ class Release
                 $finder->files();
             }
 
-            foreach (['name', 'notName', 'depth', 'exclude'] as $method) {
+            foreach (['name', 'notName', 'notPath', 'depth', 'exclude'] as $method) {
                 if (isset($item[$method])) {
                     $finder->$method($item[$method]);
                 }
