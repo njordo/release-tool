@@ -296,9 +296,9 @@ class Release
             $search = [$search];
         }
 
-        $search = array_map(fn($s) => '/\'' . str_replace('/', '\/', $s) . '\'/', $search);
+        $search = array_map(fn($s) => '/\'(' . str_replace('/', '\/', $s) . ')\'/', $search);
 
-        return preg_replace_callback($search, fn ($matches) => '"' . $this->encodeStringUtf($matches[0]) . '"', $contents);
+        return preg_replace_callback($search, fn ($matches) => '"' . $this->encodeStringUtf($matches[1]) . '"', $contents);
     }
 
 
