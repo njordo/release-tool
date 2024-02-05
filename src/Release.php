@@ -272,14 +272,35 @@ class Release
             return $contents;
         }
 
-        if (preg_match('#EXEC\((.+)\)#', $filter['replace'], $m)) {
-            $filter['replace'] = str_replace($m[0], eval($m[1]), $filter['replace']);
+        $search = $filter['search'];
+        $replace = $filter['replace'];
+
+        if (preg_match('#EXEC\((.+)\)#', $replace, $m)) {
+            $replace = str_replace($m[0], eval($m[1]), $replace);
         }
 
-        return preg_match('/^#.*#$/', $filter['search'])
-            ? preg_replace($filter['search'] . 'm', $filter['replace'], $contents)
-            : str_replace($filter['search'], $filter['replace'], $contents);
+        return preg_match('/^#.*#$/', $search) // if $search is a regular expression
+            ? preg_replace($search . 'm', $replace, $contents)
+            : str_replace($search, $replace, $contents);
     }
+
+    protected function filterEncodeStringUtf(SplFileInfo $file, string $contents, string|array $filter): string
+    {
+        $search = $filter['search'] ?? NULL;
+
+        if (is_null($search)) {
+            return $contents;
+        }
+
+        if (is_string($search)) {
+            $search = [$search];
+        }
+
+        $search = array_map(fn($s) => '/\'' . str_replace('/', '\/', $s) . '\'/', $search);
+
+        return preg_replace_callback($search, fn ($matches) => '"' . $this->encodeStringUtf($matches[0]) . '"', $contents);
+    }
+
 
     protected function filterExec(SplFileInfo $file, string $contents, string|array $filter): string
     {
@@ -290,6 +311,24 @@ class Release
         eval($filter['code']);
 
         return $contents;
+    }
+
+    /**
+     * Given a string replace all characters with their UTF-8 equivalent in \xHH format
+     *
+     * @param  string  $string
+     * @return string
+     */
+    protected function encodeStringUtf(string $string): string
+    {
+        return implode(
+            '',
+            array_map(function($char) {
+                return '\x'.bin2hex($char);
+                },
+                str_split($string)
+            )
+        );
     }
 
     protected function getTaskType(array $task): string
