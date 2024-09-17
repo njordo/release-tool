@@ -213,9 +213,11 @@ class Release
                 if (is_array($token)) {
                     list($id, $text) = $token;
 
-                    if (in_array($id, [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT])) {
+                    if (in_array($id, [T_COMMENT, T_DOC_COMMENT])) {
                         continue;
-                    }
+                    }/* elseif ($id == T_WHITESPACE) {
+                        $text = ' '; // replace multiple spaces, tabs and newlines with a single white space
+                    }*/
 
                     $token = $text;
                 }
