@@ -281,8 +281,8 @@ class Release
             $replace = str_replace($m[0], eval($m[1]), $replace);
         }
 
-        return preg_match('/^#.*#$/', $search) // if $search is a regular expression
-            ? preg_replace($search . 'm', $replace, $contents)
+        return preg_match('/^#.*#[ismU]*$/', $search) // if $search is a regular expression
+            ? preg_replace($search, $replace, $contents)
             : str_replace($search, $replace, $contents);
     }
 
