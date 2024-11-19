@@ -226,6 +226,9 @@ class Release
             }
 
             $contents = $result;
+        } elseif (in_array($file->getExtension(), ['js', 'vue'])) {
+            // replace single line and multi-line comments
+            $contents = preg_replace('/\/\/[^\r\n]*|\/\*[\s\S]*?\*\//', '', $contents);
         }
 
         return $contents;
