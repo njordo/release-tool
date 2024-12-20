@@ -227,8 +227,8 @@ class Release
 
             $contents = $result;
         } elseif (in_array($file->getExtension(), ['js', 'vue'])) {
-            // replace single line and multi-line comments
-            $contents = preg_replace('/\/\/[^\r\n]*|\/\*[\s\S]*?\*\//', '', $contents);
+            // delete only single-line comments that occupy an entire line and multi line comments
+            $contents = preg_replace('~^\s*//.*$|/\*.*?\*/~m', '', $contents);
         }
 
         return $contents;
