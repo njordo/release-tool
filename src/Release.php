@@ -11,6 +11,10 @@ use Symfony\Component\Finder\SplFileInfo;
 use ZipArchive;
 use function Termwind\{render, ask, terminal};
 
+/**
+ * Release Tool - Automates the process of creating releases from source code
+ * Supports various tasks like copying files, creating zips, filtering content, etc.
+ */
 class Release
 {
     protected const CONFIG_FILE_NAME = 'release.json';
@@ -26,17 +30,27 @@ class Release
 
     protected $taskIds;
 
+    /**
+     * Constructor - Initialize the release process
+     * Sets up paths, validates required files, and starts the release process
+     *
+     * @param array $argv Command line arguments, task IDs can be passed to run specific tasks only
+     */
     public function __construct(array $argv)
     {
         terminal()->clear();
         $this->printHeader();
+
+        // Set source folder to current working directory
         $this->sourceFolderPath = getcwd();
         $this->targetFolderPath = $this->sourcePath(static::TARGET_FOLDER_NAME);
 
+        // Validate that target path is different from source path to prevent issues
         if ($this->sourceFolderPath == $this->targetFolderPath) {
             $this->printErrorAndExit(sprintf('Check the target path, it can not be the same as the source path: %s', $this->sourceFolderPath));
         }
 
+        // Check for required configuration files
         foreach ([static::CONFIG_FILE_NAME, static::COMPOSER_FILE_NAME/*, static::SERVERS_FILE_NAME*/] as $fileName) {
             $filePath = $this->sourcePath($fileName);
 
@@ -45,19 +59,19 @@ class Release
             }
         }
 
+        // Load configuration files
         $this->composer = json_decode(file_get_contents($this->sourcePath(static::COMPOSER_FILE_NAME)));
         $this->config = json_decode(file_get_contents($this->sourcePath(static::CONFIG_FILE_NAME)), JSON_OBJECT_AS_ARRAY);
+
+        // Extract task IDs from command line arguments (skip script name)
         $this->taskIds = array_slice($argv, 1);
-//        $this->servers = $this->mapWebservers(simplexml_load_file($this->sourcePath(static::SERVERS_FILE_NAME)));
 
         $this->printVar('Source folder', $this->sourceFolderPath);
         $this->printVar('Target folder', $this->targetFolderPath);
 //        $this->printVar('Number of servers', count($this->servers));
         $this->printVar('Number of tasks', count($this->config['tasks']));
 
-//        $a = $this->renderQuestion('Do you need FTP?');
-//        $this->renderVar('FTP', $a);
-
+        // Prepare target directory - clean and recreate
         try {
             $this->deleteFolder($this->targetFolderPath);
             $this->createFolder($this->targetFolderPath);
@@ -65,21 +79,29 @@ class Release
             $this->printErrorAndExit($e->getMessage());
         }
 
+        // Start processing tasks
         $this->process();
 
         $this->printString('Release completed.');
     }
 
+    /**
+     * Process all configured tasks in sequence
+     * Supports task filtering by ID and skipping tasks marked with 'skip' flag
+     */
     protected function process(): void
     {
         foreach ($this->config['tasks'] as $i => $task) {
+            // Build dynamic method name based on task type
             $methodName = sprintf('process%sTask', ucfirst($this->getTaskType($task)));
 
+            // Skip task if marked for skipping or not in the filtered task IDs list
             if (isset($task['skip']) || (!empty($this->taskIds) && (!isset($task['id']) || !in_array($task['id'], $this->taskIds)))) {
                 $this->printStatus(sprintf('Task #%d (%s)', ++$i, 'skipped'), TRUE);
                 continue;
             }
 
+            // Execute task if corresponding method exists
             if (method_exists($this, $methodName)) {
                 try {
                     $this->$methodName($task);
@@ -92,12 +114,19 @@ class Release
         }
     }
 
+    /**
+     * Process delete task - removes files and folders matching specified patterns
+     *
+     * @param array $task Task configuration containing items to delete
+     */
     protected function processDeleteTask(array $task): void
     {
         foreach ($task['items'] as $item) {
+            // Process each folder specified in the item
             foreach ($this->getTaskItemFolder($item) as $folder) {
                 $searchFolderPath = $this->sourcePath($folder);
 
+                // Find and delete all matching items
                 foreach (iterator_to_array($this->makeFinder($searchFolderPath, $item)) as $matchedItem) {
                     $path = $matchedItem->getRealPath();
 
@@ -111,17 +140,28 @@ class Release
         }
     }
 
+    /**
+     * Process command task - executes shell commands
+     *
+     * @param array $task Task configuration containing commands to execute
+     */
     protected function processCommandTask(array $task): void
     {
         foreach ($task['items'] as $command) {
             $result = shell_exec($command);
 
+            // Check if command execution failed
             if ($result === FALSE) {
                 $this->printErrorAndExit(sprintf('Command "%s" can not be completed, result: %s', $command, $result));
             }
         }
     }
 
+    /**
+     * Process mkdir task - creates directories in the target folder
+     *
+     * @param array $task Task configuration containing directories to create
+     */
     protected function processMkdirTask(array $task): void
     {
         foreach ($task['items'] as $item) {
@@ -129,6 +169,11 @@ class Release
         }
     }
 
+    /**
+     * Process copy task - copies files and folders from source to target
+     *
+     * @param array $task Task configuration containing items to copy
+     */
     protected function processCopyTask(array $task): void
     {
         foreach ($task['items'] as $item) {
@@ -136,6 +181,7 @@ class Release
                 $searchFolderPath = $this->sourcePath($folder);
 
                 foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
+                    // Determine destination path based on item configuration
                     $destinationPath = isset($item['destination'])
                         ? $this->targetPath($item['destination'] . '/' . $match->getRelativePathname())
                         : $this->targetPath($folder . '/' . $match->getRelativePathname());
@@ -143,6 +189,7 @@ class Release
                     if (is_dir($match->getRealPath())) {
                         $this->createFolder($destinationPath);
                     } else {
+                        // Create parent directory structure before copying file
                         $fileFolderFolderPath = substr($destinationPath, 0, strrpos($destinationPath, $match->getFilename()) - 1);
                         $this->createFolder($fileFolderFolderPath);
                         copy($match->getRealPath(), $destinationPath);
@@ -152,28 +199,35 @@ class Release
         }
     }
 
+    /**
+     * Process zip task - creates ZIP archives with specified files and folders
+     *
+     * @param array $task Task configuration containing items to zip and zip settings
+     */
     protected function processZipTask(array $task): void
     {
+        // Initialize ZIP archive
         $itemZipArchive = new ZipArchive;
         $itemZipFilePath = $this->targetPath($task['zip']);
         $itemZipArchive->open($itemZipFilePath, ZipArchive::CREATE);
         $itemZipRoot = $task['root'] ?? '';
 
         foreach ($task['items'] as $item) {
-            // loop through folders of each item
+            // Loop through folders of each item
             foreach ($this->getTaskItemFolder($item) as $folder) {
                 $searchFolderPath = $this->sourcePath($folder);
 
-                // loop through matched items (files or folders) in this folder
+                // Loop through matched items (files or folders) in this folder
                 foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
+                    // Build ZIP internal path structure
                     $zipRootFolder = $itemZipRoot ? $itemZipRoot . '/' : '';
                     $zipDestinationFolder = isset($item['destination']) ? $item['destination'] . '/' : ($folder ? $folder . '/' : '');
-
                     $zipPath = $zipRootFolder . $zipDestinationFolder . $this->path($match->getRelativePathname());
 
                     if (is_dir($match->getRealPath())) {
                         $itemZipArchive->addEmptyDir($zipPath);
                     } else {
+                        // Apply filters if specified, otherwise add file directly
                         if (isset($item['filters'])) {
                             $filteredContents = $this->filter($match, $item['filters']);
                             $itemZipArchive->addFromString($zipPath, $filteredContents);
@@ -188,11 +242,20 @@ class Release
         $itemZipArchive->close();
     }
 
+    /**
+     * Apply filters to file content (remove comments, add copyright, replace text, etc.)
+     *
+     * @param SplFileInfo $file File to filter
+     * @param array $filters Array of filter configurations
+     * @return string Filtered content
+     */
     protected function filter(SplFileInfo $file, array $filters): string
     {
         $contents = $file->getContents();
 
+        // Apply each filter in sequence
         foreach ($filters as $filter) {
+            // Build dynamic filter method name
             $method = 'filter' . ucfirst(is_string($filter) ? $filter : $filter['type']);
 
             if (method_exists($this, $method)) {
@@ -203,9 +266,18 @@ class Release
         return $contents;
     }
 
+    /**
+     * Filter to remove comments from PHP, JS, and Vue files
+     *
+     * @param SplFileInfo $file File being processed
+     * @param string $contents File content
+     * @param string|array $filter Filter configuration
+     * @return string Content with comments removed
+     */
     protected function filterRemoveComments(SplFileInfo $file, string $contents, string|array $filter): string
     {
         if ($file->getExtension() == 'php') {
+            // Use PHP tokenizer to safely remove comments while preserving code structure
             $result = '';
             $tokens = token_get_all($contents);
 
@@ -213,11 +285,10 @@ class Release
                 if (is_array($token)) {
                     list($id, $text) = $token;
 
+                    // Skip comment tokens
                     if (in_array($id, [T_COMMENT, T_DOC_COMMENT])) {
                         continue;
-                    }/* elseif ($id == T_WHITESPACE) {
-                        $text = ' '; // replace multiple spaces, tabs and newlines with a single white space
-                    }*/
+                    }
 
                     $token = $text;
                 }
@@ -227,16 +298,25 @@ class Release
 
             $contents = $result;
         } elseif (in_array($file->getExtension(), ['js', 'vue'])) {
-            // delete only single-line comments that occupy an entire line and multi line comments
+            // Remove single-line and multi-line comments using regex
             $contents = preg_replace('~^\s*//.*$|/\*.*?\*/~m', '', $contents);
         }
 
         return $contents;
     }
 
+    /**
+     * Filter to add copyright header to PHP files
+     *
+     * @param SplFileInfo $file File being processed
+     * @param string $contents File content
+     * @param string|array $filter Filter configuration
+     * @return string Content with copyright header added
+     */
     protected function filterAddCopyright(SplFileInfo $file, string $contents, string|array $filter): string
     {
         if ($file->getExtension() == 'php') {
+            // Define copyright template
             $copyright = <<<TEXT
                 <?php
                 /**
@@ -250,8 +330,10 @@ class Release
                 */
                 TEXT;
 
+            // Extract author information from composer.json
             $author = $this->composer->authors[0] ?? [];
 
+            // Replace opening PHP tag with copyright header
             $contents = str_replace(
                 '<?php',
                 sprintf(
@@ -271,6 +353,14 @@ class Release
         return $contents;
     }
 
+    /**
+     * Filter to replace text or patterns in file content
+     *
+     * @param SplFileInfo $file File being processed
+     * @param string $contents File content
+     * @param string|array $filter Filter configuration with search/replace parameters
+     * @return string Content with replacements applied
+     */
     protected function filterReplace(SplFileInfo $file, string $contents, string|array $filter): string
     {
         if (!isset($filter['search']) || !isset($filter['replace'])) {
@@ -280,15 +370,25 @@ class Release
         $search = $filter['search'];
         $replace = $filter['replace'];
 
+        // Execute PHP code in replace value if EXEC() pattern is found
         if (preg_match('#EXEC\((.+)\)#', $replace, $m)) {
             $replace = str_replace($m[0], eval($m[1]), $replace);
         }
 
+        // Use regex or string replacement based on search pattern
         return preg_match('/^#.*#[ismU]*$/', $search) // if $search is a regular expression
             ? preg_replace($search, $replace, $contents)
             : str_replace($search, $replace, $contents);
     }
 
+    /**
+     * Filter to encode specified strings to UTF-8 hexadecimal format
+     *
+     * @param SplFileInfo $file File being processed
+     * @param string $contents File content
+     * @param string|array $filter Filter configuration with search strings
+     * @return string Content with strings encoded
+     */
     protected function filterEncodeStringUtf(SplFileInfo $file, string $contents, string|array $filter): string
     {
         $search = $filter['search'] ?? NULL;
@@ -297,22 +397,33 @@ class Release
             return $contents;
         }
 
+        // Convert single search string to array
         if (is_string($search)) {
             $search = [$search];
         }
 
+        // Build regex patterns for each search string
         $search = array_map(fn($s) => '/\'(' . str_replace('/', '\/', $s) . ')\'/', $search);
 
+        // Replace found strings with their UTF-8 encoded equivalent
         return preg_replace_callback($search, fn ($matches) => '"' . $this->encodeStringUtf($matches[1]) . '"', $contents);
     }
 
-
+    /**
+     * Filter to execute custom PHP code during processing
+     *
+     * @param SplFileInfo $file File being processed
+     * @param string $contents File content
+     * @param string|array $filter Filter configuration with PHP code to execute
+     * @return string Unchanged content (code execution may have side effects)
+     */
     protected function filterExec(SplFileInfo $file, string $contents, string|array $filter): string
     {
         if (!isset($filter['code'])) {
             return $contents;
         }
 
+        // Execute the provided PHP code
         eval($filter['code']);
 
         return $contents;
@@ -336,28 +447,50 @@ class Release
         );
     }
 
+    /**
+     * Get the type of task, defaulting to 'zip' if not specified
+     *
+     * @param array $task Task configuration
+     * @return string Task type
+     */
     protected function getTaskType(array $task): string
     {
         return $task['type'] ?? 'zip';
     }
 
+    /**
+     * Extract folder(s) from task item configuration
+     * Handles both string and array folder specifications
+     *
+     * @param string|array $item Task item configuration
+     * @return array Array of folder paths
+     */
     protected function getTaskItemFolder(string|array $item): array
     {
         $folder = is_array($item) ? $item['folder'] : $item;
         return is_array($folder) ? $folder : [$folder];
     }
 
+    /**
+     * Create a Symfony Finder instance configured for the given search parameters
+     *
+     * @param string $searchFolderPath Base path to search in
+     * @param string|array $item Item configuration with search criteria
+     * @return Finder Configured finder instance
+     */
     protected function makeFinder(string $searchFolderPath, string|array $item): Finder
     {
         $finder = (new Finder)->in($searchFolderPath)->ignoreDotFiles(FALSE);
 
         if (is_array($item)) {
+            // Configure finder to search for files or directories
             if (isset($item['files']) && $item['files'] === FALSE) {
                 $finder->directories();
             } else {
                 $finder->files();
             }
 
+            // Apply search criteria (name patterns, exclusions, depth limits, etc.)
             foreach (['name', 'notName', 'notPath', 'depth', 'exclude'] as $method) {
                 if (isset($item[$method])) {
                     $finder->$method($item[$method]);
@@ -368,6 +501,12 @@ class Release
         return $finder;
     }
 
+    /**
+     * Create a directory if it doesn't exist
+     *
+     * @param string $path Directory path to create
+     * @return bool True if directory exists or was created successfully
+     */
     protected function createFolder(string $path): bool
     {
         return is_dir($path) ? TRUE : mkdir($path, 0755, TRUE);
@@ -382,6 +521,7 @@ class Release
     protected function deleteFolder(string $path): bool
     {
         if (is_dir($path)) {
+            // Use recursive iterator to traverse all files and subdirectories
             $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
 
             foreach ($files as $file) {
@@ -389,6 +529,7 @@ class Release
                     rmdir($file->getPathName());
                 } else {
                     if (($file->isFile() || $file->isLink())) {
+                        // Use @ to suppress warnings, throw exception if deletion fails
                         @unlink($file->getPathname()) or throw new Exception(sprintf('Resource temporarily unavailable: %s', $file->getPathname()));
                     }
                 }
@@ -400,21 +541,42 @@ class Release
         return FALSE;
     }
 
+    /**
+     * Normalize path separators to forward slashes
+     *
+     * @param string $path Path to normalize
+     * @return string Normalized path
+     */
     protected function path(string $path): string
     {
         return str_replace('\\', '/', $path);
     }
 
+    /**
+     * Build absolute path for source file/folder
+     *
+     * @param string $relativePath Relative path from source folder
+     * @return string Absolute source path
+     */
     protected function sourcePath(string $relativePath): string
     {
         return trim($this->sourceFolderPath . '/' . $this->path($relativePath), '/');
     }
 
+    /**
+     * Build absolute path for target file/folder
+     *
+     * @param string $relativePath Relative path from target folder
+     * @return string Absolute target path
+     */
     protected function targetPath(string $relativePath): string
     {
         return trim($this->targetFolderPath . '/' . $this->path($relativePath), '/');
     }
 
+    /**
+     * Print the application header using Termwind
+     */
     protected function printHeader(): void
     {
         render(<<<HTML
@@ -423,6 +585,11 @@ class Release
         );
     }
 
+    /**
+     * Print error message using Termwind
+     *
+     * @param string $message Error message to display
+     */
     protected function printError(string $message): void
     {
         render(<<<HTML
@@ -434,12 +601,23 @@ class Release
         );
     }
 
+    /**
+     * Print error message and exit the application
+     *
+     * @param string $message Error message to display before exit
+     */
     protected function printErrorAndExit(string $message): void
     {
         $this->printError($message);
         exit;
     }
 
+    /**
+     * Print variable name and value using Termwind
+     *
+     * @param string $name Variable name
+     * @param string|null $value Variable value
+     */
     protected function printVar(string $name, ?string $value): void
     {
         render(<<<HTML
@@ -451,6 +629,12 @@ class Release
         );
     }
 
+    /**
+     * Print question prompt and return user input
+     *
+     * @param string $question Question to ask user
+     * @return mixed User's response
+     */
     protected function printQuestion(string $question): mixed
     {
         return ask(<<<HTML
@@ -462,6 +646,12 @@ class Release
         );
     }
 
+    /**
+     * Print task status (success or error) using Termwind
+     *
+     * @param string $title Task title/description
+     * @param bool $success Whether the task succeeded
+     */
     protected function printStatus(string $title, bool $success): void
     {
         $result = $success ? "<span class=\"text-green uppercase font-bold\">Ok</span>" : "<span class=\"text-red uppercase font-bold\">Error</span>";
@@ -475,6 +665,11 @@ class Release
         );
     }
 
+    /**
+     * Print regular string using Termwind
+     *
+     * @param string $string String to display
+     */
     protected function printString(string $string): void
     {
         render(<<<HTML
@@ -483,10 +678,18 @@ class Release
         );
     }
 
+    /**
+     * Parse WebServers.xml file and extract server configurations
+     * (Currently unused but available for future FTP/deployment features)
+     *
+     * @param SimpleXMLElement $xml Parsed XML content
+     * @return array Array of server configurations
+     */
     protected function mapWebservers(SimpleXMLElement $xml): array
     {
         $result = [];
 
+        // Extract server configuration from PhpStorm WebServers.xml format
         foreach ($xml->component->option->webServer as $server) {
             $name = (string) $server->attributes()->name;
 
