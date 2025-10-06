@@ -53,8 +53,19 @@ class Release
             $this->printErrorAndExit(sprintf('Check the target path, it can not be the same as the source path: %s', $this->sourceFolderPath));
         }
 
+        // Determine configuration file from CLI parameter: config=filename
+        $configFileName = static::CONFIG_FILE_NAME;
+        foreach (array_slice($argv, 1) as $arg) {
+            if (str_starts_with($arg, 'config=')) {
+                $value = substr($arg, 7);
+                if ($value !== '') {
+                    $configFileName = $value;
+                }
+            }
+        }
+
         // Check for required configuration files
-        foreach ([static::CONFIG_FILE_NAME, static::COMPOSER_FILE_NAME/*, static::SERVERS_FILE_NAME*/] as $fileName) {
+        foreach ([$configFileName, static::COMPOSER_FILE_NAME/*, static::SERVERS_FILE_NAME*/] as $fileName) {
             $filePath = $this->sourcePath($fileName);
 
             if (!file_exists($filePath)) {
@@ -64,25 +75,24 @@ class Release
 
         // Load configuration files
         $this->composer = json_decode(file_get_contents($this->sourcePath(static::COMPOSER_FILE_NAME)));
-        $this->config = json_decode(file_get_contents($this->sourcePath(static::CONFIG_FILE_NAME)), JSON_OBJECT_AS_ARRAY);
+        $this->config = json_decode(file_get_contents($this->sourcePath($configFileName)), JSON_OBJECT_AS_ARRAY);
 
-        // Extract task IDs from command line arguments (skip script name)
-        $this->taskIds = array_slice($argv, 1);
+        // Extract task IDs from "tasks=" CLI parameter (comma-separated), ignore others
+        $tasksArg = null;
+        foreach (array_slice($argv, 1) as $arg) {
+            if (str_starts_with($arg, 'tasks=')) {
+                $tasksArg = substr($arg, 6);
+                break;
+            }
+        }
+        $this->taskIds = [];
+        if (!is_null($tasksArg) && $tasksArg !== '') {
+            $this->taskIds = array_values(array_filter(array_map('trim', explode(',', $tasksArg)), fn ($v) => $v !== ''));
+        }
 
         $this->printVar('Source folder', $this->sourceFolderPath);
         $this->printVar('Target folder', $this->targetFolderPath);
-//        $this->printVar('Number of servers', count($this->servers));
         $this->printVar('Number of tasks', count($this->config['tasks']));
-
-        // Prepare target directory - clean and recreate
-        if (empty($this->taskIds)) {
-            try {
-                $this->deleteFolder($this->targetFolderPath);
-                $this->createFolder($this->targetFolderPath);
-            } catch (Exception $e) {
-                $this->printErrorAndExit($e->getMessage());
-            }
-        }
 
         // Start processing tasks
         $this->process();
@@ -116,6 +126,16 @@ class Release
                     $this->printErrorAndExit($e->getMessage());
                 }
             }
+        }
+    }
+
+    protected function processCleanTask(): void
+    {
+        try {
+            $this->deleteFolder($this->targetFolderPath);
+            $this->createFolder($this->targetFolderPath);
+        } catch (Exception $e) {
+            $this->printErrorAndExit($e->getMessage());
         }
     }
 
@@ -323,9 +343,10 @@ class Release
                         if (is_dir($match->getRealPath())) {
                             $this->ensureSftpDirectory($sftp, $targetPath);
                         } else {
-                            $sftp->put($targetPath . '/' . $match->getRelativePathname(), $match->getRealPath(), SFTP::SOURCE_LOCAL_FILE)
-                                ? $this->printStatus(sprintf('File uploaded: %s', $targetPath), TRUE)
-                                : $this->printErrorAndExit(sprintf('Failed to upload %s to %s', $match->getRealPath(), $targetPath));
+                            $targetFilePath = $targetPath . '/' . $match->getRelativePathname();
+                            $sftp->put($targetFilePath, $match->getRealPath(), SFTP::SOURCE_LOCAL_FILE)
+                                ? $this->printStatus(sprintf('File uploaded: %s', $targetFilePath), TRUE)
+                                : $this->printErrorAndExit(sprintf('Failed to upload %s to %s', $match->getRealPath(), $targetFilePath));
                         }
                     }
                 }
@@ -336,7 +357,7 @@ class Release
         if (isset($task['commands']) && is_array($task['commands']) && count($task['commands']) > 0) {
             foreach ($task['commands'] as $command) {
                 if (is_string($command)) {
-                    $commandText = $command;
+                    $commandText = str_replace('{path}', $targetPath, $command);
                     $result = $sftp->exec($commandText);
                 } else {
                     $commandText = $command['cmd'];
