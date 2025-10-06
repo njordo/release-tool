@@ -9,6 +9,9 @@ use SimpleXMLElement;
 use Symfony\Component\Finder\Finder;
 use Symfony\Component\Finder\SplFileInfo;
 use ZipArchive;
+use phpseclib3\Crypt\PublicKeyLoader;
+use phpseclib3\Net\SSH2;
+use phpseclib3\Net\SFTP;
 use function Termwind\{render, ask, terminal};
 
 /**
@@ -72,11 +75,13 @@ class Release
         $this->printVar('Number of tasks', count($this->config['tasks']));
 
         // Prepare target directory - clean and recreate
-        try {
-            $this->deleteFolder($this->targetFolderPath);
-            $this->createFolder($this->targetFolderPath);
-        } catch (Exception $e) {
-            $this->printErrorAndExit($e->getMessage());
+        if (empty($this->taskIds)) {
+            try {
+                $this->deleteFolder($this->targetFolderPath);
+                $this->createFolder($this->targetFolderPath);
+            } catch (Exception $e) {
+                $this->printErrorAndExit($e->getMessage());
+            }
         }
 
         // Start processing tasks
@@ -240,6 +245,144 @@ class Release
         }
 
         $itemZipArchive->close();
+    }
+
+    /**
+     * Process sftp task - uploads files via SFTP and optionally executes remote commands
+     *
+     * Expected task options:
+     * - host (string) required
+     * - port (int) optional, default 22
+     * - username (string) required
+     * - password (string) optional if no privateKey
+     * - privateKey (string) optional path to private key (absolute or relative to source)
+     * - passphrase (string) optional passphrase for private key
+     * - root (string) optional remote root directory, default "/"
+     * - timeout (int|float) optional connection timeout seconds
+     * - commands (array) optional list of shell commands to execute on remote host (via SSH)
+     * - items (array) required, same structure as copy/zip tasks
+     *
+     * @param array $task
+     */
+    protected function processSshTask(array $task): void
+    {
+        $host = $task['host'] ?? null;
+        $port = (int)($task['port'] ?? 22);
+        $username = $task['username'] ?? null;
+        $password = $task['password'] ?? null;
+        $privateKey = $task['privateKey'] ?? null;
+        $passphrase = $task['passphrase'] ?? null;
+        $targetPath = $task['path'] ?? '/';
+        $timeout = $task['timeout'] ?? 10;
+
+        if (!$host || !$username) {
+            $this->printErrorAndExit('SFTP task requires "host" and "username" parameters.');
+        }
+
+        // Prepare key if provided
+        $key = null;
+        if ($privateKey) {
+            $keyPath = is_file($privateKey) ? $privateKey : $this->sourcePath($privateKey);
+            if (!is_file($keyPath)) {
+                $this->printErrorAndExit(sprintf('Private key not found: %s', $privateKey));
+            }
+            $key = PublicKeyLoader::load(file_get_contents($keyPath), is_null($passphrase) ? false : $passphrase);
+        }
+
+        // Connect SFTP
+        $sftp = new SFTP($host, $port, $timeout);
+        $authOk = $key
+            ? $sftp->login($username, $key)
+            : ($password ? $sftp->login($username, $password) : false);
+
+        if ($authOk) {
+            $this->printString(sprintf('SFTP connected to %s@%s:%d', $username, $host, $port));
+
+            // Ensure target path exists and change working directory for SFTP operations
+            $this->ensureSftpDirectory($sftp, $targetPath);
+
+            if (!$sftp->chdir($targetPath)) {
+                $this->printErrorAndExit(sprintf('Failed to change directory to %s', $targetPath));
+            }
+        } else {
+            $this->printErrorAndExit('SFTP authentication failed.');
+        }
+
+        // Upload items
+        if (isset($task['items'])) {
+            foreach ($task['items'] as $item) {
+                foreach ($this->getTaskItemFolder($item) as $folder) {
+                    $searchFolderPath = $this->sourcePath($folder);
+
+                    foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
+                        if (isset($item['destination'])) {
+                            $this->ensureSftpDirectory($sftp, $item['destination']);
+                            $targetPath = rtrim($targetPath, '/') . '/' . $item['destination'];
+                        }
+
+                        if (is_dir($match->getRealPath())) {
+                            $this->ensureSftpDirectory($sftp, $targetPath);
+                        } else {
+                            $sftp->put($targetPath . '/' . $match->getRelativePathname(), $match->getRealPath(), SFTP::SOURCE_LOCAL_FILE)
+                                ? $this->printStatus(sprintf('File uploaded: %s', $targetPath), TRUE)
+                                : $this->printErrorAndExit(sprintf('Failed to upload %s to %s', $match->getRealPath(), $targetPath));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Execute commands (if any)
+        if (isset($task['commands']) && is_array($task['commands']) && count($task['commands']) > 0) {
+            foreach ($task['commands'] as $command) {
+                if (is_string($command)) {
+                    $commandText = $command;
+                    $result = $sftp->exec($commandText);
+                } else {
+                    $commandText = $command['cmd'];
+                    $result = $sftp->exec((isset($command['cd']) ? 'cd ' . escapeshellarg(str_replace('{path}', $targetPath, $command['cd'])) . ' && ' : '') . $commandText);
+                }
+
+                $result = trim($result);
+
+                if ($result === false) {
+                    $this->printErrorAndExit(sprintf('Remote command failed: %s', $commandText));
+                } else {
+                    $this->printString(sprintf('%s@%s:%s# %s', $username, $host, $targetPath, $commandText));
+                    $this->printText($result);
+                }
+            }
+        }
+
+        $sftp->disconnect();
+    }
+
+    /**
+     * Ensure a remote directory (and all its parents) exists on the SFTP server.
+     *
+     * @param SFTP $sftp
+     * @param string $remoteDir
+     * @return void
+     */
+    protected function ensureSftpDirectory(SFTP $sftp, string $remoteDir): void
+    {
+        $remoteDir = rtrim($this->path($remoteDir), '/');
+        if ($remoteDir === '') {
+            return;
+        }
+
+        $isAbsolute = str_starts_with($remoteDir, '/');
+        $parts = array_values(array_filter(explode('/', ltrim($remoteDir, '/')), fn ($p) => $p !== ''));
+        $current = $isAbsolute ? '/' : '';
+
+        foreach ($parts as $part) {
+            $current = ($current === '' || $current === '/') ? ($current . $part) : ($current . '/' . $part);
+            if (!$sftp->is_dir($current)) {
+                if (!$sftp->mkdir($current)) {
+                    $this->printErrorAndExit(sprintf('Unable to create remote directory: %s', $current));
+                }
+            }
+        }
     }
 
     /**
@@ -676,6 +819,13 @@ class Release
           <span class="text-gray-200 mr-1">$string</span>
         HTML
         );
+    }
+
+    protected function printText(string $text): void
+    {
+        foreach (explode("\n", $text) as $line) {
+            $this->printString($line);
+        }
     }
 
     /**

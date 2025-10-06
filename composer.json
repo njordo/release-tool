@@ -12,6 +12,7 @@
         "symfony/finder": "^5.4",
         "nunomaduro/termwind": "^1.15",
         "ext-zip": "*",
-        "ext-simplexml": "*"
+        "ext-simplexml": "*",
+        "phpseclib/phpseclib": "^3.0"
     }
 }
