@@ -337,16 +337,18 @@ class Release
                     foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
                         if (isset($item['destination'])) {
                             $this->ensureSftpDirectory($sftp, $item['destination']);
-                            $targetPath = rtrim($targetPath, '/') . '/' . $item['destination'];
+                            // Do not mutate $targetPath; compute a per-item target instead
+                            $itemTargetPath = rtrim($targetPath, '/') . '/' . $item['destination'];
+                        } else {
+                            $itemTargetPath = $targetPath;
                         }
 
                         if (is_dir($match->getRealPath())) {
-                            $this->ensureSftpDirectory($sftp, $targetPath);
+                            $this->ensureSftpDirectory($sftp, $itemTargetPath);
                         } else {
-                            $targetFilePath = $targetPath . '/' . $match->getRelativePathname();
-                            $sftp->put($targetFilePath, $match->getRealPath(), SFTP::SOURCE_LOCAL_FILE)
-                                ? $this->printStatus(sprintf('File uploaded: %s', $targetFilePath), TRUE)
-                                : $this->printErrorAndExit(sprintf('Failed to upload %s to %s', $match->getRealPath(), $targetFilePath));
+                            $sftp->put($itemTargetPath . '/' . $match->getRelativePathname(), $match->getRealPath(), SFTP::SOURCE_LOCAL_FILE)
+                                ? $this->printStatus(sprintf('File uploaded: %s', $itemTargetPath), TRUE)
+                                : $this->printErrorAndExit(sprintf('Failed to upload %s to %s', $match->getRealPath(), $itemTargetPath));
                         }
                     }
                 }
@@ -358,19 +360,33 @@ class Release
             foreach ($task['commands'] as $command) {
                 if (is_string($command)) {
                     $commandText = str_replace('{path}', $targetPath, $command);
-                    $result = $sftp->exec($commandText);
+                    $cmd = $commandText;
                 } else {
                     $commandText = $command['cmd'];
-                    $result = $sftp->exec((isset($command['cd']) ? 'cd ' . escapeshellarg(str_replace('{path}', $targetPath, $command['cd'])) . ' && ' : '') . $commandText);
+                    $cd = isset($command['cd']) ? 'cd ' . escapeshellarg(str_replace('{path}', $targetPath, $command['cd'])) . ' && ' : '';
+                    $cmd = $cd . $commandText;
                 }
 
-                $result = trim($result);
+                // Run command and drain both STDOUT and STDERR to ensure channel closes
+                $output = (string) $sftp->exec($cmd);
+                $errorOutput = (string) $sftp->getStdError();
 
-                if ($result === false) {
+                if ($output === '' && $errorOutput === '' && $sftp->isTimeout()) {
+                    $this->printErrorAndExit(sprintf('Remote command timed out: %s', $commandText));
+                }
+
+                if ($output === '' && $errorOutput !== '') {
+                    $this->printErrorAndExit(sprintf('Remote command failed: %s; stderr: %s', $commandText, trim($errorOutput)));
+                }
+
+                if ($output === false) {
                     $this->printErrorAndExit(sprintf('Remote command failed: %s', $commandText));
                 } else {
                     $this->printString(sprintf('%s@%s:%s# %s', $username, $host, $targetPath, $commandText));
-                    $this->printText($result);
+                    $this->printText(trim($output));
+                    if ($errorOutput !== '') {
+                        $this->printText(trim($errorOutput));
+                    }
                 }
             }
         }
