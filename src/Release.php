@@ -112,7 +112,7 @@ class Release
 
             // Skip task if marked for skipping or not in the filtered task IDs list
             if (isset($task['skip']) || (!empty($this->taskIds) && (!isset($task['id']) || !in_array($task['id'], $this->taskIds)))) {
-                $this->printStatus(sprintf('Task #%d (%s)', ++$i, 'skipped'), TRUE);
+                $this->printStatus(sprintf('Task #%d', ++$i), 'warning', 'SKIPPED');
                 continue;
             }
 
@@ -120,9 +120,9 @@ class Release
             if (method_exists($this, $methodName)) {
                 try {
                     $this->$methodName($task);
-                    $this->printStatus(sprintf('Task #%d (%s)', ++$i, $this->getTaskType($task)), TRUE);
+                    $this->printStatus(sprintf('Task #%d (%s)', ++$i, $this->getTaskType($task)));
                 } catch (Exception $e) {
-                    $this->printStatus(sprintf('Task #%d (%s)', ++$i, $this->getTaskType($task)), FALSE);
+                    $this->printStatus(sprintf('Task #%d (%s)', ++$i, $this->getTaskType($task)), 'error', 'FAILED');
                     $this->printErrorAndExit($e->getMessage());
                 }
             }
@@ -347,7 +347,7 @@ class Release
                             $this->ensureSftpDirectory($sftp, $itemTargetPath);
                         } else {
                             $sftp->put($itemTargetPath . '/' . $match->getRelativePathname(), $match->getRealPath(), SFTP::SOURCE_LOCAL_FILE)
-                                ? $this->printStatus(sprintf('File uploaded: %s', $itemTargetPath), TRUE)
+                                ? $this->printStatus(sprintf('File: %s', $itemTargetPath), 'success', 'UPLOADED')
                                 : $this->printErrorAndExit(sprintf('Failed to upload %s to %s', $match->getRealPath(), $itemTargetPath));
                         }
                     }
@@ -827,14 +827,23 @@ class Release
     }
 
     /**
-     * Print task status (success or error) using Termwind
+     * Print task status using Termwind
      *
-     * @param string $title Task title/description
-     * @param bool $success Whether the task succeeded
+     * @param  string  $title
+     * @param  string  $type
+     * @param  string  $status
+     * @return void
      */
-    protected function printStatus(string $title, bool $success): void
+    protected function printStatus(string $title, string $type = 'success', string $status = 'OK'): void
     {
-        $result = $success ? "<span class=\"text-green uppercase font-bold\">Ok</span>" : "<span class=\"text-red uppercase font-bold\">Error</span>";
+        $class = match (strtolower($type)) {
+            'success' => 'text-green',
+            'error' => 'text-red',
+            'warning' => 'text-yellow',
+            default => 'text-gray-200',
+        };
+
+        $result = sprintf('<span class="%s uppercase font-bold">%s</span>', $class, $status);
 
         render(<<<HTML
           <div>
