@@ -346,9 +346,10 @@ class Release
                         if (is_dir($match->getRealPath())) {
                             $this->ensureSftpDirectory($sftp, $itemTargetPath);
                         } else {
-                            $sftp->put($itemTargetPath . '/' . $match->getRelativePathname(), $match->getRealPath(), SFTP::SOURCE_LOCAL_FILE)
-                                ? $this->printStatus(sprintf('File: %s', $itemTargetPath), 'success', 'UPLOADED')
-                                : $this->printErrorAndExit(sprintf('Failed to upload %s to %s', $match->getRealPath(), $itemTargetPath));
+                            $itemFilePath = $itemTargetPath . '/' . $match->getRelativePathname();
+                            $sftp->put($itemFilePath, $match->getRealPath(), SFTP::SOURCE_LOCAL_FILE)
+                                ? $this->printStatus(sprintf('File: %s', $itemFilePath), 'success', 'UPLOADED')
+                                : $this->printErrorAndExit(sprintf('Failed to upload: %s', $itemFilePath));
                         }
                     }
                 }
