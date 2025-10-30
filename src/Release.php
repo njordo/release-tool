@@ -10,8 +10,8 @@ use Symfony\Component\Finder\Finder;
 use Symfony\Component\Finder\SplFileInfo;
 use ZipArchive;
 use phpseclib3\Crypt\PublicKeyLoader;
-use phpseclib3\Net\SSH2;
 use phpseclib3\Net\SFTP;
+use phpseclib3\Net\SSH2;
 use function Termwind\{render, ask, terminal};
 
 /**
@@ -294,6 +294,7 @@ class Release
         $passphrase = $task['passphrase'] ?? null;
         $targetPath = $task['path'] ?? '/';
         $timeout = $task['timeout'] ?? 10;
+        $commandTimeout = $task['commandTimeout'] ?? $timeout;
 
         if (!$host || !$username) {
             $this->printErrorAndExit('SFTP task requires "host" and "username" parameters.');
@@ -309,7 +310,7 @@ class Release
             $key = PublicKeyLoader::load(file_get_contents($keyPath), is_null($passphrase) ? false : $passphrase);
         }
 
-        // Connect SFTP
+        // Connect SFTP (for file transfers)
         $sftp = new SFTP($host, $port, $timeout);
         $authOk = $key
             ? $sftp->login($username, $key)
@@ -317,10 +318,7 @@ class Release
 
         if ($authOk) {
             $this->printString(sprintf('SFTP connected to %s@%s:%d', $username, $host, $port));
-
-            // Ensure target path exists and change working directory for SFTP operations
             $this->ensureSftpDirectory($sftp, $targetPath);
-
             if (!$sftp->chdir($targetPath)) {
                 $this->printErrorAndExit(sprintf('Failed to change directory to %s', $targetPath));
             }
@@ -337,7 +335,6 @@ class Release
                     foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
                         if (isset($item['destination'])) {
                             $this->ensureSftpDirectory($sftp, $item['destination']);
-                            // Do not mutate $targetPath; compute a per-item target instead
                             $itemTargetPath = rtrim($targetPath, '/') . '/' . $item['destination'];
                         } else {
                             $itemTargetPath = $targetPath;
@@ -347,6 +344,8 @@ class Release
                             $this->ensureSftpDirectory($sftp, $itemTargetPath);
                         } else {
                             $itemFilePath = $itemTargetPath . '/' . $match->getRelativePathname();
+                            // Ensure nested directories for the file exist
+                            $this->ensureSftpDirectory($sftp, dirname($itemFilePath));
                             $sftp->put($itemFilePath, $match->getRealPath(), SFTP::SOURCE_LOCAL_FILE)
                                 ? $this->printStatus(sprintf('File: %s', $itemFilePath), 'success', 'UPLOADED')
                                 : $this->printErrorAndExit(sprintf('Failed to upload: %s', $itemFilePath));
@@ -356,8 +355,19 @@ class Release
             }
         }
 
-        // Execute commands (if any)
+        // Execute commands (if any) on a separate SSH2 connection to avoid channel conflicts with SFTP
         if (isset($task['commands']) && is_array($task['commands']) && count($task['commands']) > 0) {
+            $ssh = new SSH2($host, $port, $timeout);
+            $authCmdOk = $key
+                ? $ssh->login($username, $key)
+                : ($password ? $ssh->login($username, $password) : false);
+
+            if (!$authCmdOk) {
+                $this->printErrorAndExit('SSH authentication failed for command execution.');
+            }
+
+            $ssh->setTimeout($commandTimeout);
+
             foreach ($task['commands'] as $command) {
                 if (is_string($command)) {
                     $commandText = str_replace('{path}', $targetPath, $command);
@@ -368,11 +378,11 @@ class Release
                     $cmd = $cd . $commandText;
                 }
 
-                // Run command and drain both STDOUT and STDERR to ensure channel closes
-                $output = (string) $sftp->exec($cmd);
-                $errorOutput = (string) $sftp->getStdError();
+                // Run command and drain both STDOUT and STDERR
+                $output = (string) $ssh->exec($cmd);
+                $errorOutput = (string) $ssh->getStdError();
 
-                if ($output === '' && $errorOutput === '' && $sftp->isTimeout()) {
+                if ($output === '' && $errorOutput === '' && $ssh->isTimeout()) {
                     $this->printErrorAndExit(sprintf('Remote command timed out: %s', $commandText));
                 }
 
@@ -390,6 +400,8 @@ class Release
                     }
                 }
             }
+
+            $ssh->disconnect();
         }
 
         $sftp->disconnect();
