@@ -393,6 +393,8 @@ class Release
             }
 
             $phar->setStub($stubContent);
+            $phar->setSignatureAlgorithm(Phar::SHA512);
+
             $phar->stopBuffering();
         } catch (\Exception $e) {
             $this->printErrorAndExit('PHAR creation failed: ' . $e->getMessage());
