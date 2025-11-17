@@ -3,6 +3,7 @@
 namespace Financialplugins\ReleaseTool;
 
 use Exception;
+use Phar;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use SimpleXMLElement;
@@ -22,7 +23,6 @@ class Release
 {
     protected const CONFIG_FILE_NAME = 'release.json';
     protected const COMPOSER_FILE_NAME = 'composer.json';
-    protected const SERVERS_FILE_NAME = '.idea/WebServers.xml';
     protected const TARGET_FOLDER_NAME = 'release';
 
     protected $sourceFolderPath;
@@ -65,7 +65,7 @@ class Release
         }
 
         // Check for required configuration files
-        foreach ([$configFileName, static::COMPOSER_FILE_NAME/*, static::SERVERS_FILE_NAME*/] as $fileName) {
+        foreach ([$configFileName, static::COMPOSER_FILE_NAME] as $fileName) {
             $filePath = $this->sourcePath($fileName);
 
             if (!file_exists($filePath)) {
@@ -232,10 +232,10 @@ class Release
     protected function processZipTask(array $task): void
     {
         // Initialize ZIP archive
-        $itemZipArchive = new ZipArchive;
-        $itemZipFilePath = $this->targetPath($task['zip']);
-        $itemZipArchive->open($itemZipFilePath, ZipArchive::CREATE);
-        $itemZipRoot = $task['root'] ?? '';
+        $taskZipArchive = new ZipArchive;
+        $taskZipFilePath = $this->targetPath($task['output'] ?? $task['zip']);
+        $taskZipArchive->open($taskZipFilePath, ZipArchive::CREATE);
+        $taskZipRoot = $task['root'] ?? null;
 
         foreach ($task['items'] as $item) {
             // Loop through folders of each item
@@ -245,26 +245,158 @@ class Release
                 // Loop through matched items (files or folders) in this folder
                 foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
                     // Build ZIP internal path structure
-                    $zipRootFolder = $itemZipRoot ? $itemZipRoot . '/' : '';
-                    $zipDestinationFolder = isset($item['destination']) ? $item['destination'] . '/' : ($folder ? $folder . '/' : '');
-                    $zipPath = $zipRootFolder . $zipDestinationFolder . $this->path($match->getRelativePathname());
+                    $zipDestinationFolder = $item['destination'] ?? $folder;
+                    $parts = array_values(array_filter([$taskZipRoot, $zipDestinationFolder, $this->path($match->getRelativePathname())], fn($v) => $v !== null && $v !== ''));
+                    $zipPath = implode('/', $parts);
 
                     if (is_dir($match->getRealPath())) {
-                        $itemZipArchive->addEmptyDir($zipPath);
+                        $taskZipArchive->addEmptyDir($zipPath);
                     } else {
                         // Apply filters if specified, otherwise add file directly
                         if (isset($item['filters'])) {
                             $filteredContents = $this->filter($match, $item['filters']);
-                            $itemZipArchive->addFromString($zipPath, $filteredContents);
+                            $taskZipArchive->addFromString($zipPath, $filteredContents);
                         } else {
-                            $itemZipArchive->addFile($match->getRealPath(), $zipPath);
+                            $taskZipArchive->addFile($match->getRealPath(), $zipPath);
                         }
                     }
                 }
             }
         }
 
-        $itemZipArchive->close();
+        $taskZipArchive->close();
+    }
+
+    /**
+     * Process phar task - creates a PHAR archive with specified files and folders
+     *
+     * Task options:
+     * - output (string) required: path/name of the phar file relative to target folder
+     * - root (string) optional: prepend path inside the archive
+     * - entry (string) optional: bootstrap file inside the phar used by default stub (defaults to "index.php")
+     * - stub (string) optional: custom stub content or path to a stub file (absolute or relative to source)
+     * - items (array) required: same structure as copy/zip tasks
+     *
+     * @param array $task
+     */
+    protected function processPharTask(array $task): void
+    {
+        if (!isset($task['output']) || !$task['output']) {
+            $this->printErrorAndExit('PHAR task requires "output" parameter.');
+        }
+
+        // Ensure phar.readonly is disabled
+        $readonly = ini_get('phar.readonly');
+        if ($readonly && $readonly !== '0') {
+            @ini_set('phar.readonly', '0');
+            if (ini_get('phar.readonly') !== '0') {
+                $this->printErrorAndExit('Unable to create PHAR: phar.readonly is enabled.');
+            }
+        }
+
+        $pharFilePath = $this->targetPath($task['output']);
+        $pharDir = dirname($pharFilePath);
+        $this->createFolder($pharDir);
+
+        // Recreate file if exists
+        if (file_exists($pharFilePath)) {
+            unlink($pharFilePath);
+        }
+
+        $alias = basename($pharFilePath);
+        $pharRoot = $task['root'] ?? '';
+
+        // Build PHAR
+        try {
+            $phar = new Phar($pharFilePath);
+            $phar->setAlias($alias);
+            $phar->startBuffering();
+
+            if (isset($task['items'])) {
+                foreach ($task['items'] as $item) {
+                    foreach ($this->getTaskItemFolder($item) as $folder) {
+                        $searchFolderPath = $this->sourcePath($folder);
+                        // Try fast path for large folders: use buildFromIterator when no filters/criteria are specified
+                        $isArray = is_array($item);
+                        $hasFilters = $isArray && isset($item['filters']);
+                        $allowedKeys = ['folder', 'destination'];
+                        $hasOnlyAllowedKeys = !$isArray || empty(array_diff(array_keys($item), $allowedKeys));
+                        $isDir = is_dir($searchFolderPath);
+
+                        if ($isDir && !$hasFilters && $hasOnlyAllowedKeys) {
+                            // Build prefix to mirror previous behavior (root + destination or folder name)
+                            $pharRootFolder = $pharRoot ? $pharRoot . '/' : '';
+                            $destinationFolder = ($isArray && isset($item['destination']) && $item['destination'] !== '')
+                                ? rtrim($item['destination'], '/') . '/'
+                                : ($folder ? rtrim($folder, '/') . '/' : '');
+                            $prefix = $pharRootFolder . $destinationFolder;
+
+                            // Generator producing key => absolute path for files only
+                            $gen = (function () use ($searchFolderPath, $prefix) {
+                                $directory = new RecursiveDirectoryIterator($searchFolderPath, RecursiveDirectoryIterator::SKIP_DOTS);
+                                $iterator = new RecursiveIteratorIterator($directory, RecursiveIteratorIterator::LEAVES_ONLY);
+                                $baseLen = strlen(rtrim($searchFolderPath, '\\/')) + 1;
+                                foreach ($iterator as $file) {
+                                    if ($file->isFile()) {
+                                        $real = $file->getPathname();
+                                        $rel = substr($real, $baseLen);
+                                        $key = $prefix . str_replace('\\', '/', $rel);
+                                        yield $key => $real;
+                                    }
+                                }
+                            })();
+
+                            $phar->buildFromIterator($gen);
+                            continue; // next folder
+                        }
+
+                        // Fallback: precise selection via Finder (supports filters and patterns)
+                        foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
+                            $pharRootFolder = $pharRoot ? $pharRoot . '/' : '';
+                            $destinationFolder = isset($item['destination']) ? $item['destination'] . '/' : ($folder ? $folder . '/' : '');
+                            $pharPath = $pharRootFolder . $destinationFolder . $this->path($match->getRelativePathname());
+
+                            if (is_dir($match->getRealPath())) {
+                                $phar->addEmptyDir($pharPath);
+                            } else {
+                                if (isset($item['filters'])) {
+                                    $filtered = $this->filter($match, $item['filters']);
+                                    $phar->addFromString($pharPath, $filtered);
+                                } else {
+                                    $phar->addFile($match->getRealPath(), $pharPath);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Stub
+            $entry = $task['entry'] ?? 'index.php';
+            $stubContent = null;
+            if (isset($task['stub']) && is_string($task['stub']) && $task['stub'] !== '') {
+                $stubSource = $task['stub'];
+                if (str_contains($stubSource, '<?php')) {
+                    $stubContent = $stubSource;
+                } else {
+                    $stubPath = is_file($stubSource) ? $stubSource : $this->sourcePath($stubSource);
+                    if (is_file($stubPath)) {
+                        $stubContent = file_get_contents($stubPath);
+                    }
+                }
+            }
+
+            if ($stubContent === null) {
+                // Default stub maps the phar alias and includes the entry file from the archive
+                $entryPath = 'phar://' . $alias . '/' . ltrim($pharRoot . '/' . $entry, '/');
+                $stubContent = "<?php\nPhar::mapPhar('" . addslashes($alias) . "');\nrequire '" . addslashes($entryPath) . "';\n__HALT_COMPILER();";
+            }
+
+            $phar->setStub($stubContent);
+            $phar->stopBuffering();
+        } catch (\Exception $e) {
+            $this->printErrorAndExit('PHAR creation failed: ' . $e->getMessage());
+        }
     }
 
     /**
