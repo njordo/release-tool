@@ -1073,4 +1073,146 @@ class Release
 
         return $defaultValue;
     }
+
+    protected function processPotTask(array $task): void
+    {
+        $domain = $task['domain'] ?? $this->composer->name ?? ($this->package->name ?? 'messages');
+        $outputFile = $task['output'] ?? $domain . '.pot';
+        $functions = $task['functions'] ?? ['__', '_e', '_x', '_n', '$t', '_ex', '_nx'];
+
+        $pluralFunctions = array_intersect($functions, ['_n', 'ngettext', '_n_noop', '_nx', '_nx_noop']);
+        $singleFunctions = array_diff($functions, $pluralFunctions);
+
+        $strings = []; // ordered collection
+        $seen = [];    // uniqueness set
+
+        foreach ($task['items'] as $item) {
+            foreach ($this->getTaskItemFolders($item) as $folder) {
+                $searchFolderPath = $this->sourcePath($folder);
+                foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
+                    if (is_dir($match->getRealPath())) {
+                        continue;
+                    }
+                    $contents = $match->getContents();
+
+                    // Single/context functions: first argument only
+                    foreach ($singleFunctions as $fn) {
+                        $rx = '/\b' . preg_quote($fn, '/') . '\s*\(\s*(["\'])(.*?)\1/';
+                        if (preg_match_all($rx, $contents, $ms, PREG_SET_ORDER)) {
+                            foreach ($ms as $m) {
+                                $text = $this->unescapeString($m[2] ?? '');
+                                if ($text !== '' && !isset($seen[$text])) {
+                                    $seen[$text] = true;
+                                    $strings[] = $text;
+                                }
+                            }
+                        }
+                    }
+
+                    // Plural functions: first two translatable args
+                    foreach ($pluralFunctions as $fn) {
+                        $rxPlural = '/\b' . preg_quote($fn, '/') . '\s*\(\s*(["\'])(.*?)\1\s*,\s*(["\'])(.*?)\3/';
+                        if (preg_match_all($rxPlural, $contents, $mp, PREG_SET_ORDER)) {
+                            foreach ($mp as $p) {
+                                $singular = $this->unescapeString($p[2] ?? '');
+                                $plural = $this->unescapeString($p[4] ?? '');
+                                if ($singular !== '' && !isset($seen[$singular])) {
+                                    $seen[$singular] = true;
+                                    $strings[] = $singular;
+                                }
+                                if ($plural !== '' && !isset($seen[$plural])) {
+                                    $seen[$plural] = true;
+                                    $strings[] = $plural;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Alphabetical (case-insensitive natural) ordering
+        natcasesort($strings);
+        $strings = array_values($strings);
+
+        $productName = $this->composer->name ?? ($this->package->name ?? 'Project');
+        $pot = $this->buildPot($strings, $productName);
+
+        $outputPath = $this->targetPath($outputFile);
+        $this->ensureDirectoryExists(dirname($outputPath));
+        file_put_contents($outputPath, $pot);
+
+        $phpFile = <<<PHP
+        <?php
+            defined('ABSPATH') or die('Direct access is not allowed');
+            
+            return [
+              %s
+            ];
+        PHP;
+
+        $phpFile = sprintf($phpFile, implode(",\n", array_map(function (string $string) use ($domain) {
+            return "'" . addslashes($string) . "' => __('" . addslashes($string) . "', '" . addslashes($domain) . "')";
+        }, $strings)));
+
+        file_put_contents($this->targetPath('text-strings.php'), $phpFile);
+    }
+
+    /**
+     * Create POT content from collected strings.
+     *
+     * @param array $strings
+     * @param string $projectName
+     * @return string
+     */
+    protected function buildPot(array $strings, string $projectName): string
+    {
+        $header = ''
+            . 'msgid ""' . "\n"
+            . 'msgstr ""' . "\n"
+            . '"Project-Id-Version: ' . addslashes($projectName) . '\n"' . "\n"
+            . '"Report-Msgid-Bugs-To: \n"' . "\n"
+            . '"POT-Creation-Date: ' . gmdate('Y-m-d H:i:s\Z') . '\n"' . "\n"
+            . '"PO-Revision-Date: ' . gmdate('Y-m-d H:i:s\Z') . '\n"' . "\n"
+            . '"Last-Translator: \n"' . "\n"
+            . '"Language-Team: \n"' . "\n"
+            . '"MIME-Version: 1.0\n"' . "\n"
+            . '"Content-Type: text/plain; charset=UTF-8\n"' . "\n"
+            . '"Content-Transfer-Encoding: 8bit\n"' . "\n"
+            . '"X-Generator: ReleaseTool\n"' . "\n\n";
+
+        $body = '';
+        foreach ($strings as $s) {
+            // Skip empty and whitespace-only
+            if (trim($s) === '') {
+                continue;
+            }
+            $body .= 'msgid "' . $this->escapePo($s) . '"' . "\n";
+            $body .= 'msgstr ""' . "\n\n";
+        }
+
+        return $header . $body;
+    }
+
+    /**
+     * Unescape common string literal escapes to raw text.
+     */
+    protected function unescapeString(string $s): string
+    {
+        // Handle PHP/JS-style escapes minimally
+        $s = str_replace(["\\n", "\\r", "\\t"], ["\n", "\r", "\t"], $s);
+        $s = str_replace(['\\"', "\\'"], ['"', "'"], $s);
+        return $s;
+    }
+
+    /**
+     * Escape text for PO msgid/msgstr.
+     */
+    protected function escapePo(string $s): string
+    {
+        $s = str_replace(["\\", "\""], ["\\\\", "\\\""], $s);
+        $s = str_replace(["\r\n", "\r"], ["\n", "\n"], $s);
+        $s = str_replace("\n", "\\n", $s);
+        return $s;
+    }
 }
