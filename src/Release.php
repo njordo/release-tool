@@ -6,7 +6,6 @@ use Exception;
 use Phar;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
-use SimpleXMLElement;
 use Symfony\Component\Finder\Finder;
 use Symfony\Component\Finder\SplFileInfo;
 use ZipArchive;
@@ -1151,7 +1150,7 @@ class Release
             ];
         PHP;
 
-        $phpFile = sprintf($phpFile, implode(",\n", array_map(function (string $string) use ($domain) {
+        $phpFile = sprintf($phpFile, implode(",\r\n", array_map(function (string $string) use ($domain) {
             return "'" . addslashes($string) . "' => __('" . addslashes($string) . "', '" . addslashes($domain) . "')";
         }, $strings)));
 
