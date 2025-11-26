@@ -23,15 +23,16 @@ class Release
 {
     protected const CONFIG_FILE_NAME = 'release.json';
     protected const COMPOSER_FILE_NAME = 'composer.json';
+    protected const PACKAGE_FILE_NAME = 'package.json';
     protected const TARGET_FOLDER_NAME = 'release';
 
-    protected $sourceFolderPath;
-    protected $targetFolderPath;
-    protected $composer;
-    protected $config;
-    protected $servers;
+    protected string $sourceFolderPath;
+    protected string $targetFolderPath;
+    protected ?object $composer;
+    protected ?object $package;
+    protected array $config;
 
-    protected $taskIds;
+    protected array $taskIds;
 
     /**
      * Constructor - Initialize the release process
@@ -53,19 +54,13 @@ class Release
             $this->printErrorAndExit(sprintf('Check the target path, it can not be the same as the source path: %s', $this->sourceFolderPath));
         }
 
+        $this->ensureDirectoryExists($this->targetFolderPath);
+
         // Determine configuration file from CLI parameter: config=filename
-        $configFileName = static::CONFIG_FILE_NAME;
-        foreach (array_slice($argv, 1) as $arg) {
-            if (str_starts_with($arg, 'config=')) {
-                $value = substr($arg, 7);
-                if ($value !== '') {
-                    $configFileName = $value;
-                }
-            }
-        }
+        $configFileName = $this->getArgument('config', static::CONFIG_FILE_NAME);
 
         // Check for required configuration files
-        foreach ([$configFileName, static::COMPOSER_FILE_NAME] as $fileName) {
+        foreach ([$configFileName] as $fileName) {
             $filePath = $this->sourcePath($fileName);
 
             if (!file_exists($filePath)) {
@@ -74,17 +69,15 @@ class Release
         }
 
         // Load configuration files
-        $this->composer = json_decode(file_get_contents($this->sourcePath(static::COMPOSER_FILE_NAME)));
+        $composerFilePath = $this->sourcePath(static::COMPOSER_FILE_NAME);
+        $packageFilePath = $this->sourcePath(static::PACKAGE_FILE_NAME);
+        $this->composer = file_exists($composerFilePath) ? json_decode(file_get_contents($composerFilePath)) : null;
+        $this->package = file_exists($packageFilePath) ? json_decode(file_get_contents($packageFilePath)) : null;
         $this->config = json_decode(file_get_contents($this->sourcePath($configFileName)), JSON_OBJECT_AS_ARRAY);
 
         // Extract task IDs from "tasks=" CLI parameter (comma-separated), ignore others
-        $tasksArg = null;
-        foreach (array_slice($argv, 1) as $arg) {
-            if (str_starts_with($arg, 'tasks=')) {
-                $tasksArg = substr($arg, 6);
-                break;
-            }
-        }
+        $tasksArg = $this->getArgument('tasks');
+
         $this->taskIds = [];
         if (!is_null($tasksArg) && $tasksArg !== '') {
             $this->taskIds = array_values(array_filter(array_map('trim', explode(',', $tasksArg)), fn ($v) => $v !== ''));
@@ -133,7 +126,7 @@ class Release
     {
         try {
             $this->deleteFolder($this->targetFolderPath);
-            $this->createFolder($this->targetFolderPath);
+            $this->ensureDirectoryExists($this->targetFolderPath);
         } catch (Exception $e) {
             $this->printErrorAndExit($e->getMessage());
         }
@@ -148,7 +141,7 @@ class Release
     {
         foreach ($task['items'] as $item) {
             // Process each folder specified in the item
-            foreach ($this->getTaskItemFolder($item) as $folder) {
+            foreach ($this->getTaskItemFolders($item) as $folder) {
                 $searchFolderPath = $this->sourcePath($folder);
 
                 // Find and delete all matching items
@@ -190,7 +183,7 @@ class Release
     protected function processMkdirTask(array $task): void
     {
         foreach ($task['items'] as $item) {
-            $this->createFolder($this->targetPath($item));
+            $this->ensureDirectoryExists($this->targetPath($item));
         }
     }
 
@@ -202,7 +195,7 @@ class Release
     protected function processCopyTask(array $task): void
     {
         foreach ($task['items'] as $item) {
-            foreach ($this->getTaskItemFolder($item) as $folder) {
+            foreach ($this->getTaskItemFolders($item) as $folder) {
                 $searchFolderPath = $this->sourcePath($folder);
 
                 foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
@@ -212,11 +205,11 @@ class Release
                         : $this->targetPath($folder . '/' . $match->getRelativePathname());
 
                     if (is_dir($match->getRealPath())) {
-                        $this->createFolder($destinationPath);
+                        $this->ensureDirectoryExists($destinationPath);
                     } else {
                         // Create parent directory structure before copying file
                         $fileFolderFolderPath = substr($destinationPath, 0, strrpos($destinationPath, $match->getFilename()) - 1);
-                        $this->createFolder($fileFolderFolderPath);
+                        $this->ensureDirectoryExists($fileFolderFolderPath);
                         copy($match->getRealPath(), $destinationPath);
                     }
                 }
@@ -234,12 +227,17 @@ class Release
         // Initialize ZIP archive
         $taskZipArchive = new ZipArchive;
         $taskZipFilePath = $this->targetPath($task['output'] ?? $task['zip']);
-        $taskZipArchive->open($taskZipFilePath, ZipArchive::CREATE);
+        $res = $taskZipArchive->open($taskZipFilePath, ZipArchive::CREATE);
+
+        if ($res !== true) {
+            $this->printErrorAndExit(sprintf('Unable to open/create zip "%s" (code: %s)', $taskZipFilePath, $res));
+        }
+
         $taskZipRoot = $task['root'] ?? null;
 
         foreach ($task['items'] as $item) {
             // Loop through folders of each item
-            foreach ($this->getTaskItemFolder($item) as $folder) {
+            foreach ($this->getTaskItemFolders($item) as $folder) {
                 $searchFolderPath = $this->sourcePath($folder);
 
                 // Loop through matched items (files or folders) in this folder
@@ -296,7 +294,7 @@ class Release
 
         $pharFilePath = $this->targetPath($task['output']);
         $pharDir = dirname($pharFilePath);
-        $this->createFolder($pharDir);
+        $this->ensureDirectoryExists($pharDir);
 
         // Recreate file if exists
         if (file_exists($pharFilePath)) {
@@ -314,7 +312,7 @@ class Release
 
             if (isset($task['items'])) {
                 foreach ($task['items'] as $item) {
-                    foreach ($this->getTaskItemFolder($item) as $folder) {
+                    foreach ($this->getTaskItemFolders($item) as $folder) {
                         $searchFolderPath = $this->sourcePath($folder);
                         // Try fast path for large folders: use buildFromIterator when no filters/criteria are specified
                         $isArray = is_array($item);
@@ -452,7 +450,7 @@ class Release
 
         if ($authOk) {
             $this->printString(sprintf('SFTP connected to %s@%s:%d', $username, $host, $port));
-            $this->ensureSftpDirectory($sftp, $targetPath);
+            $this->ensureRemoteDirectoryExists($sftp, $targetPath);
             if (!$sftp->chdir($targetPath)) {
                 $this->printErrorAndExit(sprintf('Failed to change directory to %s', $targetPath));
             }
@@ -463,23 +461,23 @@ class Release
         // Upload items
         if (isset($task['items'])) {
             foreach ($task['items'] as $item) {
-                foreach ($this->getTaskItemFolder($item) as $folder) {
+                foreach ($this->getTaskItemFolders($item) as $folder) {
                     $searchFolderPath = $this->sourcePath($folder);
 
                     foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
                         if (isset($item['destination'])) {
-                            $this->ensureSftpDirectory($sftp, $item['destination']);
+                            $this->ensureRemoteDirectoryExists($sftp, $item['destination']);
                             $itemTargetPath = rtrim($targetPath, '/') . '/' . $item['destination'];
                         } else {
                             $itemTargetPath = $targetPath;
                         }
 
                         if (is_dir($match->getRealPath())) {
-                            $this->ensureSftpDirectory($sftp, $itemTargetPath);
+                            $this->ensureRemoteDirectoryExists($sftp, $itemTargetPath);
                         } else {
                             $itemFilePath = $itemTargetPath . '/' . $match->getRelativePathname();
                             // Ensure nested directories for the file exist
-                            $this->ensureSftpDirectory($sftp, dirname($itemFilePath));
+                            $this->ensureRemoteDirectoryExists($sftp, dirname($itemFilePath));
                             $sftp->put($itemFilePath, $match->getRealPath(), SFTP::SOURCE_LOCAL_FILE)
                                 ? $this->printStatus(sprintf('File: %s', $itemFilePath), 'success', 'UPLOADED')
                                 : $this->printErrorAndExit(sprintf('Failed to upload: %s', $itemFilePath));
@@ -548,7 +546,7 @@ class Release
      * @param string $remoteDir
      * @return void
      */
-    protected function ensureSftpDirectory(SFTP $sftp, string $remoteDir): void
+    protected function ensureRemoteDirectoryExists(SFTP $sftp, string $remoteDir): void
     {
         $remoteDir = rtrim($this->path($remoteDir), '/');
         if ($remoteDir === '') {
@@ -643,6 +641,10 @@ class Release
     protected function filterAddCopyright(SplFileInfo $file, string $contents, string|array $filter): string
     {
         if ($file->getExtension() == 'php') {
+            if (!$this->composer) {
+                return '';
+            }
+
             // Define copyright template
             $copyright = <<<TEXT
                 <?php
@@ -659,14 +661,15 @@ class Release
 
             // Extract author information from composer.json
             $author = $this->composer->authors[0] ?? [];
+            $description = $this->composer->description ?? $this->composer->name;
 
             // Replace opening PHP tag with copyright header
             $contents = str_replace(
                 '<?php',
                 sprintf(
                     $copyright,
-                    $this->composer->description ?? $this->composer->name,
-                    str_repeat('-', strlen($this->composer->description ?? $this->composer->name)),
+                    $description,
+                    str_repeat('-', strlen($description)),
                     $file->getFilename(),
                     $author->name ?? '',
                     $author->name ?? '',
@@ -675,6 +678,42 @@ class Release
                 ),
                 $contents
             );
+        }
+        if ($file->getExtension() == 'js') {
+            if (!$this->package) {
+                return '';
+            }
+
+            // Define copyright template
+            $copyright = <<<TEXT
+                /*!
+                 * ============================================================
+                 * Projec       : %s
+                 * Author       : %s
+                 * Website      : %s
+                 * License      : %s
+                 * Copyright    : (c) %d %s
+                 * ============================================================
+                 */
+                TEXT;
+
+            // Extract author information from composer.json
+            $authorName = $this->package->author->name ?? '';
+            $authorEmail = $this->package->author->email ?? '';
+            $authorWebsite = $this->package->author->url ?? '';
+            $license = $this->package->license ?? '';
+            $year = date('Y');
+            $description = $this->package->description ?? $this->package->name;
+
+            $contents = sprintf(
+                $copyright,
+                $description,
+                $authorName . ($authorEmail ? ' <' . $authorEmail . '>' : ''),
+                $authorWebsite,
+                $license,
+                $year,
+                $authorName
+            ) . "\n" . $contents;
         }
 
         return $contents;
@@ -792,7 +831,7 @@ class Release
      * @param string|array $item Task item configuration
      * @return array Array of folder paths
      */
-    protected function getTaskItemFolder(string|array $item): array
+    protected function getTaskItemFolders(string|array $item): array
     {
         $folder = is_array($item) ? $item['folder'] : $item;
         return is_array($folder) ? $folder : [$folder];
@@ -834,7 +873,7 @@ class Release
      * @param string $path Directory path to create
      * @return bool True if directory exists or was created successfully
      */
-    protected function createFolder(string $path): bool
+    protected function ensureDirectoryExists(string $path): bool
     {
         return is_dir($path) ? TRUE : mkdir($path, 0755, TRUE);
     }
@@ -1021,29 +1060,17 @@ class Release
         }
     }
 
-    /**
-     * Parse WebServers.xml file and extract server configurations
-     * (Currently unused but available for future FTP/deployment features)
-     *
-     * @param SimpleXMLElement $xml Parsed XML content
-     * @return array Array of server configurations
-     */
-    protected function mapWebservers(SimpleXMLElement $xml): array
+    protected function getArgument(string $prefix, ?string $defaultValue = null): ?string
     {
-        $result = [];
+        $argv = $GLOBALS['argv'] ?? [];
 
-        // Extract server configuration from PhpStorm WebServers.xml format
-        foreach ($xml->component->option->webServer as $server) {
-            $name = (string) $server->attributes()->name;
-
-            $result[$name] = (object) [
-                'host' => (string) $server->fileTransfer->attributes()->host,
-                'port' => (string) $server->fileTransfer->attributes()->port,
-                'rootFolder' => (string) $server->fileTransfer->attributes()->rootFolder,
-                'accessType' => (string) $server->fileTransfer->attributes()->accessType,
-            ];
+        foreach (array_slice($argv, 1) as $arg) {
+            if (str_starts_with($arg, $prefix . '=')) {
+                $value = substr($arg, strlen($prefix) + 1);
+                return $value !== '' ? $value : '';
+            }
         }
 
-        return $result;
+        return $defaultValue;
     }
 }
