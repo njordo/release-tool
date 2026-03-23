@@ -410,7 +410,7 @@ class Release
      * - passphrase (string) optional passphrase for private key
      * - root (string) optional remote root directory, default "/"
      * - timeout (int|float) optional connection timeout seconds
-     * - commands (array) optional list of shell commands to execute on remote host (via SSH)
+     * - commands (array) optional list of string shell commands to execute on remote host (via SSH)
      * - items (array) required, same structure as copy/zip tasks
      *
      * @param array $task
@@ -498,20 +498,22 @@ class Release
             }
 
             $ssh->setTimeout($commandTimeout);
+            $currentDateTime = date('Y-m-d_H-i-s');
 
             foreach ($task['commands'] as $command) {
-                if (is_string($command)) {
-                    $commandText = str_replace('{path}', $targetPath, $command);
-                    $cmd = $commandText;
-                } else {
-                    $commandText = $command['cmd'];
-                    $cd = isset($command['cd']) ? 'cd ' . escapeshellarg(str_replace('{path}', $targetPath, $command['cd'])) . ' && ' : '';
-                    $cmd = $cd . $commandText;
+                if (!is_string($command)) {
+                    $this->printErrorAndExit('SSH task commands must be strings.');
                 }
 
+                $commandText = str_replace(
+                    ['{path}', '{datetime}'],
+                    [$targetPath, $currentDateTime],
+                    $command
+                );
+
                 // Run command and drain both STDOUT and STDERR
-                $output = (string) $ssh->exec($cmd);
-                $errorOutput = (string) $ssh->getStdError();
+                $output = (string) $ssh->exec($commandText);
+                $errorOutput = $ssh->getStdError();
 
                 if ($output === '' && $errorOutput === '' && $ssh->isTimeout()) {
                     $this->printErrorAndExit(sprintf('Remote command timed out: %s', $commandText));
