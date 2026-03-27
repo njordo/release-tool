@@ -270,7 +270,7 @@ class Release
      * Task options:
      * - output (string) required: path/name of the phar file relative to target folder
      * - root (string) optional: prepend path inside the archive
-     * - entry (string) optional: bootstrap file inside the phar used by default stub (defaults to "index.php")
+     * - entry (string) optional: bootstrap file inside the phar used by the default stub; when omitted, no file is required automatically
      * - stub (string) optional: custom stub content or path to a stub file (absolute or relative to source)
      * - items (array) required: same structure as copy/zip tasks
      *
@@ -369,7 +369,12 @@ class Release
             }
 
             // Stub
-            $entry = $task['entry'] ?? 'index.php';
+            $entry = isset($task['entry']) && is_string($task['entry'])
+                ? trim($task['entry'])
+                : null;
+            if ($entry === '') {
+                $entry = null;
+            }
             $stubContent = null;
             if (isset($task['stub']) && is_string($task['stub']) && $task['stub'] !== '') {
                 $stubSource = $task['stub'];
@@ -384,9 +389,15 @@ class Release
             }
 
             if ($stubContent === null) {
-                // Default stub maps the phar alias and includes the entry file from the archive
-                $entryPath = 'phar://' . $alias . '/' . ltrim($pharRoot . '/' . $entry, '/');
-                $stubContent = "<?php\nPhar::mapPhar('" . addslashes($alias) . "');\nrequire '" . addslashes($entryPath) . "';\n__HALT_COMPILER();";
+                // Default stub always maps the phar alias and only includes an entry file when one is configured
+                $stubContent = "<?php\nPhar::mapPhar('" . addslashes($alias) . "');\n";
+
+                if ($entry !== null) {
+                    $entryPath = 'phar://' . $alias . '/' . ltrim($pharRoot . '/' . $entry, '/');
+                    $stubContent .= "require '" . addslashes($entryPath) . "';\n";
+                }
+
+                $stubContent .= "__HALT_COMPILER();";
             }
 
             $phar->setStub($stubContent);
@@ -408,7 +419,7 @@ class Release
      * - password (string) optional if no privateKey
      * - privateKey (string) optional path to private key (absolute or relative to source)
      * - passphrase (string) optional passphrase for private key
-     * - root (string) optional remote root directory, default "/"
+     * - path (string) optional remote working directory / upload target, default "/"
      * - timeout (int|float) optional connection timeout seconds
      * - commands (array) optional list of string shell commands to execute on remote host (via SSH)
      * - items (array) required, same structure as copy/zip tasks
