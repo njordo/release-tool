@@ -24,7 +24,7 @@ When you run the tool:
 1. It uses the current working directory as the **source folder**.
 2. It creates or reuses a `release/` directory in that folder.
 3. It loads `release.json` by default.
-4. It optionally filters tasks by task ID.
+4. It optionally filters tasks by task ID and can exclude selected task IDs from the CLI.
 5. It processes tasks sequentially.
 6. It stops immediately if a task fails.
 
@@ -82,11 +82,31 @@ Run only selected tasks by `id`:
 php .\make tasks=build-zip,deploy
 ```
 
+Skip selected tasks by `id`:
+
+```powershell
+php .\make skip-tasks=deploy,notify
+```
+
+Run only selected tasks and then exclude some of them:
+
+```powershell
+php .\make tasks=clean,package,deploy skip-tasks=deploy
+```
+
 Use both together:
 
 ```powershell
 php .\make config=release.production.json tasks=clean,package,deploy
 ```
+
+### CLI filtering rules
+
+- `tasks=...` acts as an allow-list.
+- `skip-tasks=...` acts as a deny-list.
+- If the same task ID appears in both lists, it is skipped.
+- Tasks without an `id` cannot be selected or skipped by these CLI filters.
+- A task with a config-level `skip` field is always skipped.
 
 ### Typical console output
 
@@ -132,7 +152,7 @@ Most tasks support these top-level properties:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `id` | string | Optional task ID, useful with `tasks=...` |
+| `id` | string | Optional task ID, useful with `tasks=...` and `skip-tasks=...` |
 | `type` | string | Task type; if missing, defaults to `zip` |
 | `skip` | any | If present, the task is skipped |
 | `items` | array | Task-specific input items |
@@ -142,6 +162,8 @@ Most tasks support these top-level properties:
 - Tasks run in the order defined in `tasks`.
 - If `skip` exists, that task is skipped.
 - If `tasks=...` is passed on the CLI, only tasks with matching `id` values run.
+- If `skip-tasks=...` is passed on the CLI, tasks with matching `id` values are excluded.
+- If both CLI filters are used, `skip-tasks` removes tasks from the `tasks` allow-list.
 - If a task throws an exception or calls an error exit, processing stops.
 
 ---
@@ -705,8 +727,9 @@ Uploads files by SFTP and can execute remote shell commands over SSH.
 
 For each command string:
 
-1. `{path}` is replaced with the configured remote `path`
-2. `{datetime}` is replaced with the current timestamp in `Y-m-d_H-i-s`
+1. the tool first runs `cd {path} && ...`, so the command executes inside the configured remote folder
+2. `{path}` is still replaced with the configured remote `path` if you want to reference it explicitly inside the command
+3. `{datetime}` is replaced with the current timestamp in `Y-m-d_H-i-s`
 
 ### Input example using password auth
 
@@ -727,8 +750,8 @@ For each command string:
     }
   ],
   "commands": [
-    "php {path}/artisan migrate --force",
-    "php {path}/artisan cache:clear",
+    "php artisan migrate --force",
+    "php artisan cache:clear",
     "tar -czf {path}/backup-{datetime}.tar.gz {path}/storage"
   ]
 }
@@ -745,15 +768,15 @@ Remote upload result:
 Remote command behavior:
 
 ```sh
-php /var/www/my-app/artisan migrate --force
-php /var/www/my-app/artisan cache:clear
-tar -czf /var/www/my-app/backup-2026-03-27_14-30-00.tar.gz /var/www/my-app/storage
+cd /var/www/my-app && php artisan migrate --force
+cd /var/www/my-app && php artisan cache:clear
+cd /var/www/my-app && tar -czf /var/www/my-app/backup-2026-03-27_14-30-00.tar.gz /var/www/my-app/storage
 ```
 
 ### Example console output
 
 ```text
-deploy@example.com:~# php /var/www/my-app/artisan migrate --force
+deploy@example.com:/var/www/my-app# cd /var/www/my-app && php artisan migrate --force
 Migrating: 2026_03_27_000000_add_index
 Migrated:  2026_03_27_000000_add_index
 ```
@@ -788,6 +811,7 @@ Migrated:  2026_03_27_000000_add_index
 - File uploads use SFTP.
 - Commands run over a separate SSH connection after uploads finish.
 - `commands` must be strings.
+- Every command is prefixed with `cd <path> &&` automatically.
 - If a command times out or writes only stderr, the task fails.
 
 ---
@@ -1012,6 +1036,7 @@ Cause:
 
 - the task has `skip` set
 - or you ran with `tasks=...` and the task `id` is not in that list
+- or you ran with `skip-tasks=...` and the task `id` is in that list
 
 ### PHAR creation fails because of `phar.readonly`
 

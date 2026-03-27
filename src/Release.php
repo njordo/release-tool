@@ -32,6 +32,7 @@ class Release
     protected array $config;
 
     protected array $taskIds;
+    protected array $skipTaskIds;
 
     /**
      * Constructor - Initialize the release process
@@ -74,13 +75,9 @@ class Release
         $this->package = file_exists($packageFilePath) ? json_decode(file_get_contents($packageFilePath)) : null;
         $this->config = json_decode(file_get_contents($this->sourcePath($configFileName)), JSON_OBJECT_AS_ARRAY);
 
-        // Extract task IDs from "tasks=" CLI parameter (comma-separated), ignore others
-        $tasksArg = $this->getArgument('tasks');
-
-        $this->taskIds = [];
-        if (!is_null($tasksArg) && $tasksArg !== '') {
-            $this->taskIds = array_values(array_filter(array_map('trim', explode(',', $tasksArg)), fn ($v) => $v !== ''));
-        }
+        // Extract task IDs from CLI parameters (comma-separated), ignore others
+        $this->taskIds = $this->parseCsvArgumentValues($this->getArgument('tasks'));
+        $this->skipTaskIds = $this->parseCsvArgumentValues($this->getArgument('skip-tasks'));
 
         $this->printVar('Source folder', $this->sourceFolderPath);
         $this->printVar('Target folder', $this->targetFolderPath);
@@ -101,9 +98,13 @@ class Release
         foreach ($this->config['tasks'] as $i => $task) {
             // Build dynamic method name based on task type
             $methodName = sprintf('process%sTask', ucfirst($this->getTaskType($task)));
+            $taskId = $task['id'] ?? null;
+            $isSkippedByConfig = array_key_exists('skip', $task);
+            $isExcludedByTasksFilter = !empty($this->taskIds) && ($taskId === null || !in_array($taskId, $this->taskIds, true));
+            $isExcludedBySkipTasksFilter = !empty($this->skipTaskIds) && $taskId !== null && in_array($taskId, $this->skipTaskIds, true);
 
-            // Skip task if marked for skipping or not in the filtered task IDs list
-            if (isset($task['skip']) || (!empty($this->taskIds) && (!isset($task['id']) || !in_array($task['id'], $this->taskIds)))) {
+            // Skip task if marked for skipping, not in the allow-list, or explicitly excluded from the CLI
+            if ($isSkippedByConfig || $isExcludedByTasksFilter || $isExcludedBySkipTasksFilter) {
                 $this->printStatus(sprintf('Task #%d', ++$i), 'warning', 'SKIPPED');
                 continue;
             }
@@ -521,6 +522,7 @@ class Release
                     [$targetPath, $currentDateTime],
                     $command
                 );
+                $commandText = sprintf('cd %s && %s', $this->escapePosixShellArgument($targetPath), $commandText);
 
                 // Run command and drain both STDOUT and STDERR
                 $output = (string) $ssh->exec($commandText);
@@ -1084,6 +1086,20 @@ class Release
         }
 
         return $defaultValue;
+    }
+
+    protected function parseCsvArgumentValues(?string $value): array
+    {
+        if (is_null($value) || $value === '') {
+            return [];
+        }
+
+        return array_values(array_unique(array_filter(array_map('trim', explode(',', $value)), fn ($v) => $v !== '')));
+    }
+
+    protected function escapePosixShellArgument(string $value): string
+    {
+        return "'" . str_replace("'", "'\"'\"'", $value) . "'";
     }
 
     protected function processPotTask(array $task): void
