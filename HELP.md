@@ -204,6 +204,7 @@ A string item means “use this folder”.
 {
   "folder": "src",
   "destination": "app",
+  "targetName": "bootstrap.php",
   "name": "*.php",
   "notName": "*.test.php",
   "notPath": "vendor",
@@ -227,6 +228,7 @@ A string item means “use this folder”.
 | --- | --- | --- |
 | `folder` | string or string[] | Folder to search in |
 | `destination` | string | Destination subfolder in the target or archive |
+| `targetName` | string | For `copy` and `zip` tasks: rename each matched file to this final filename while keeping its relative parent folders |
 | `name` | string or array | Include filename pattern(s) |
 | `notName` | string or array | Exclude filename pattern(s) |
 | `notPath` | string or array | Exclude path pattern(s) |
@@ -544,11 +546,38 @@ release/app/Controller/HomeController.php
 release/public/index.php
 ```
 
+### Rename a copied file
+
+Input:
+
+```json
+{
+  "id": "copy-env-template",
+  "type": "copy",
+  "items": [
+    {
+      "folder": ".",
+      "name": ".env.install",
+      "destination": "",
+      "targetName": ".env"
+    }
+  ]
+}
+```
+
+Expected result:
+
+```text
+release/.env
+```
+
 ### Notes
 
 - If `destination` is omitted, the original folder name is used inside `release/`.
 - Directory creation is automatic.
 - `copy` does not apply file-content filters.
+- `targetName` changes only the final file name; it does not change destination folders.
+- `targetName` is valid for files only and must not contain `/` or `\`.
 
 ---
 
@@ -605,10 +634,37 @@ If filters are used:
 - matching files are added with transformed content
 - non-filtered files are stored directly
 
+### Rename a file inside the ZIP
+
+Input:
+
+```json
+{
+  "id": "package-env-template",
+  "type": "zip",
+  "output": "packages/env.zip",
+  "items": [
+    {
+      "folder": "",
+      "name": ".env.install",
+      "targetName": ".env"
+    }
+  ]
+}
+```
+
+Expected archive contents:
+
+```text
+.env
+```
+
 ### Notes
 
 - `root` prefixes paths inside the ZIP only.
 - `output` is relative to `release/`.
+- `targetName` changes only the final file name inside the archive; it does not change destination folders.
+- `targetName` is valid for files only and must not contain `/` or `\`.
 
 ---
 

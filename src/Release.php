@@ -199,17 +199,40 @@ class Release
                 $searchFolderPath = $this->sourcePath($folder);
 
                 foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
-                    // Determine destination path based on item configuration
-                    $destinationPath = isset($item['destination'])
-                        ? $this->targetPath($item['destination'] . '/' . $match->getRelativePathname())
-                        : $this->targetPath($folder . '/' . $match->getRelativePathname());
+                    $relativePathname = $this->path($match->getRelativePathname());
+                    $relativeDestinationPath = $relativePathname;
+
+                    if (is_array($item) && array_key_exists('targetName', $item)) {
+                        if (is_dir($match->getRealPath())) {
+                            $this->printErrorAndExit('Copy task item "targetName" can only be used for files.');
+                        }
+
+                        if (!is_string($item['targetName']) || trim($item['targetName']) === '') {
+                            $this->printErrorAndExit('Copy task item "targetName" must be a non-empty string.');
+                        }
+
+                        $targetName = trim($item['targetName']);
+                        if (str_contains($targetName, '/') || str_contains($targetName, '\\')) {
+                            $this->printErrorAndExit('Copy task item "targetName" must be a file name only, without directory separators.');
+                        }
+
+                        $relativeFolder = dirname($relativePathname);
+                        $relativeDestinationPath = ($relativeFolder === '.' ? '' : $relativeFolder . '/') . $targetName;
+                    }
+
+                    $targetBaseFolder = is_array($item) && isset($item['destination'])
+                        ? $item['destination']
+                        : ($folder === '.' ? '' : $folder);
+                    $destinationPath = $this->targetPath(implode('/', array_values(array_filter([
+                        $targetBaseFolder,
+                        $relativeDestinationPath,
+                    ], fn ($value) => $value !== null && $value !== ''))));
 
                     if (is_dir($match->getRealPath())) {
                         $this->ensureDirectoryExists($destinationPath);
                     } else {
                         // Create parent directory structure before copying file
-                        $fileFolderFolderPath = substr($destinationPath, 0, strrpos($destinationPath, $match->getFilename()) - 1);
-                        $this->ensureDirectoryExists($fileFolderFolderPath);
+                        $this->ensureDirectoryExists(dirname($destinationPath));
                         copy($match->getRealPath(), $destinationPath);
                     }
                 }
@@ -242,16 +265,37 @@ class Release
 
                 // Loop through matched items (files or folders) in this folder
                 foreach ($this->makeFinder($searchFolderPath, $item) as $match) {
+                    $relativePathname = $this->path($match->getRelativePathname());
+                    $relativeZipPath = $relativePathname;
+
+                    if (is_array($item) && array_key_exists('targetName', $item)) {
+                        if (is_dir($match->getRealPath())) {
+                            $this->printErrorAndExit('Zip task item "targetName" can only be used for files.');
+                        }
+
+                        if (!is_string($item['targetName']) || trim($item['targetName']) === '') {
+                            $this->printErrorAndExit('Zip task item "targetName" must be a non-empty string.');
+                        }
+
+                        $targetName = trim($item['targetName']);
+                        if (str_contains($targetName, '/') || str_contains($targetName, '\\')) {
+                            $this->printErrorAndExit('Zip task item "targetName" must be a file name only, without directory separators.');
+                        }
+
+                        $relativeFolder = dirname($relativePathname);
+                        $relativeZipPath = ($relativeFolder === '.' ? '' : $relativeFolder . '/') . $targetName;
+                    }
+
                     // Build ZIP internal path structure
-                    $zipDestinationFolder = $item['destination'] ?? $folder;
-                    $parts = array_values(array_filter([$taskZipRoot, $zipDestinationFolder, $this->path($match->getRelativePathname())], fn($v) => $v !== null && $v !== ''));
+                    $zipDestinationFolder = is_array($item) && isset($item['destination']) ? $item['destination'] : $folder;
+                    $parts = array_values(array_filter([$taskZipRoot, $zipDestinationFolder, $relativeZipPath], fn($v) => $v !== null && $v !== ''));
                     $zipPath = implode('/', $parts);
 
                     if (is_dir($match->getRealPath())) {
                         $taskZipArchive->addEmptyDir($zipPath);
                     } else {
                         // Apply filters if specified, otherwise add file directly
-                        if (isset($item['filters'])) {
+                        if (is_array($item) && isset($item['filters'])) {
                             $filteredContents = $this->filter($match, $item['filters']);
                             $taskZipArchive->addFromString($zipPath, $filteredContents);
                         } else {
