@@ -767,9 +767,11 @@ Uploads files by SFTP and can execute remote shell commands over SSH.
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `host` | string | Yes | Remote server hostname or IP |
-| `port` | int | No | SSH port, default `22` |
-| `username` | string | Yes | SSH/SFTP username |
+| `sshConfig` | string | Cond. | `Host` entry name from `~/.ssh/config` |
+| `sshConfigFile` | string | No | SSH config file path, default `~/.ssh/config` |
+| `host` | string | Cond. | Remote server hostname or IP, or override for `sshConfig` |
+| `port` | int | No | SSH port, default `22`, or value from `sshConfig` |
+| `username` | string | Cond. | SSH/SFTP username, or value from `sshConfig` |
 | `password` | string | Cond. | Password auth, used if no `privateKey` |
 | `privateKey` | string | Cond. | Path to private key |
 | `passphrase` | string | No | Private key passphrase |
@@ -861,6 +863,46 @@ Migrated:  2026_03_27_000000_add_index
 }
 ```
 
+### SSH config and agent auth example
+
+If `~/.ssh/config` contains:
+
+```sshconfig
+Host production
+  HostName example.com
+  User deploy
+  Port 22
+  IdentityFile ~/.ssh/production_ed25519
+```
+
+and the matching key is loaded in your SSH agent, the task can use the named config:
+
+```json
+{
+  "type": "ssh",
+  "sshConfig": "production",
+  "path": "/srv/app",
+  "items": [
+    {
+      "folder": "release",
+      "destination": "app"
+    }
+  ],
+  "commands": [
+    "composer install --no-dev --optimize-autoloader",
+    "php bin/console cache:clear"
+  ]
+}
+```
+
+On Windows, when `SSH_AUTH_SOCK` is not set, the tool uses the built-in OpenSSH agent pipe:
+
+```text
+\\.\pipe\openssh-ssh-agent
+```
+
+Explicit task values override the SSH config values, so you can set `host`, `port`, `username`, or `privateKey` in the task when needed. Use `sshConfigFile` to read a non-default config file.
+
 ### Notes
 
 - Remote directories are created automatically.
@@ -868,6 +910,9 @@ Migrated:  2026_03_27_000000_add_index
 - Commands run over a separate SSH connection after uploads finish.
 - `commands` must be strings.
 - Every command is prefixed with `cd <path> &&` automatically.
+- `sshConfig` reads `HostName`, `User`, `Port`, `IdentityFile`, and `IdentityAgent` from OpenSSH config.
+- Agent auth is used automatically when `sshConfig` is supplied.
+- If `IdentityFile` is set, the matching key must be loaded in ssh-agent.
 - If a command times out or writes only stderr, the task fails.
 
 ---

@@ -12,6 +12,7 @@ use ZipArchive;
 use phpseclib3\Crypt\PublicKeyLoader;
 use phpseclib3\Net\SFTP;
 use phpseclib3\Net\SSH2;
+use phpseclib3\System\SSH\Agent;
 use function Termwind\{render, ask, terminal};
 
 /**
@@ -458,9 +459,11 @@ class Release
      * Process sftp task - uploads files via SFTP and optionally executes remote commands
      *
      * Expected task options:
-     * - host (string) required
+     * - sshConfig (string) optional Host entry name from ~/.ssh/config
+     * - sshConfigFile (string) optional SSH config path, default ~/.ssh/config
+     * - host (string) required unless sshConfig provides HostName
      * - port (int) optional, default 22
-     * - username (string) required
+     * - username (string) required unless sshConfig provides User
      * - password (string) optional if no privateKey
      * - privateKey (string) optional path to private key (absolute or relative to source)
      * - passphrase (string) optional passphrase for private key
@@ -473,35 +476,51 @@ class Release
      */
     protected function processSshTask(array $task): void
     {
-        $host = $task['host'] ?? null;
-        $port = (int)($task['port'] ?? 22);
-        $username = $task['username'] ?? null;
+        $sshConfigName = $task['sshConfig'] ?? null;
+        $sshConfig = is_string($sshConfigName)
+            ? $this->readSshConfigHost($sshConfigName, $task['sshConfigFile'] ?? null)
+            : [];
+
+        $host = $task['host'] ?? $sshConfig['hostname'] ?? $sshConfigName;
+        $port = (int)($task['port'] ?? $sshConfig['port'] ?? 22);
+        $username = $task['username'] ?? $sshConfig['user'] ?? $this->getDefaultSshUsername();
         $password = $task['password'] ?? null;
-        $privateKey = $task['privateKey'] ?? null;
+        $privateKey = $task['privateKey'] ?? ($sshConfigName === null ? null : ($sshConfig['identityfile'] ?? null));
         $passphrase = $task['passphrase'] ?? null;
         $targetPath = $task['path'] ?? '/';
         $timeout = $task['timeout'] ?? 10;
         $commandTimeout = $task['commandTimeout'] ?? $timeout;
+        $useAgent = $sshConfigName !== null;
 
         if (!$host || !$username) {
-            $this->printErrorAndExit('SFTP task requires "host" and "username" parameters.');
+            $this->printErrorAndExit('SFTP task requires "host" and "username" parameters, or an "sshConfig" entry that provides them.');
         }
 
-        // Prepare key if provided
+        // Prepare key if provided. With sshConfig this is used to select the matching ssh-agent identity.
         $key = null;
         if ($privateKey) {
-            $keyPath = is_file($privateKey) ? $privateKey : $this->sourcePath($privateKey);
+            $keyPath = $this->resolvePrivateKeyPath($privateKey, $sshConfigName !== null);
             if (!is_file($keyPath)) {
                 $this->printErrorAndExit(sprintf('Private key not found: %s', $privateKey));
             }
             $key = PublicKeyLoader::load(file_get_contents($keyPath), is_null($passphrase) ? false : $passphrase);
         }
 
+        $agent = null;
+        if (!$password && $useAgent) {
+            $agent = $this->makeSshAgent($sshConfig['identityagent'] ?? null);
+            if ($key) {
+                $agentKey = $agent->findIdentityByPublicKey($key->getPublicKey());
+                if (!$agentKey) {
+                    $this->printErrorAndExit(sprintf('Private key from SSH config is not loaded in ssh-agent: %s', $privateKey));
+                }
+                $key = $agentKey;
+            }
+        }
+
         // Connect SFTP (for file transfers)
         $sftp = new SFTP($host, $port, $timeout);
-        $authOk = $key
-            ? $sftp->login($username, $key)
-            : ($password ? $sftp->login($username, $password) : false);
+        $authOk = $this->loginSshConnection($sftp, $username, $key, $password, $agent);
 
         if ($authOk) {
             $this->printString(sprintf('SFTP connected to %s@%s:%d', $username, $host, $port));
@@ -545,9 +564,7 @@ class Release
         // Execute commands (if any) on a separate SSH2 connection to avoid channel conflicts with SFTP
         if (isset($task['commands']) && is_array($task['commands']) && count($task['commands']) > 0) {
             $ssh = new SSH2($host, $port, $timeout);
-            $authCmdOk = $key
-                ? $ssh->login($username, $key)
-                : ($password ? $ssh->login($username, $password) : false);
+            $authCmdOk = $this->loginSshConnection($ssh, $username, $key, $password, $agent);
 
             if (!$authCmdOk) {
                 $this->printErrorAndExit('SSH authentication failed for command execution.');
@@ -595,6 +612,184 @@ class Release
         }
 
         $sftp->disconnect();
+    }
+
+    /**
+     * Read the effective values for one Host entry from an OpenSSH config file.
+     *
+     * @param string $hostName
+     * @param string|null $configFile
+     * @return array<string,string>
+     */
+    protected function readSshConfigHost(string $hostName, ?string $configFile): array
+    {
+        $configPath = $this->expandHomePath($configFile ?: '~/.ssh/config');
+        if (!is_file($configPath)) {
+            $this->printErrorAndExit(sprintf('SSH config file not found: %s', $configPath));
+        }
+
+        $values = [];
+        $active = true;
+
+        foreach (file($configPath, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+            $line = trim($this->stripSshConfigComment($line));
+            if ($line === '') {
+                continue;
+            }
+
+            $parts = preg_split('/\s+|=/', $line, 2);
+            if (!$parts || count($parts) < 2) {
+                continue;
+            }
+
+            $keyword = strtolower($parts[0]);
+            $value = trim($parts[1], " \t\"'");
+
+            if ($keyword === 'host') {
+                $patterns = preg_split('/\s+/', $value) ?: [];
+                $active = $this->sshConfigHostMatches($hostName, $patterns);
+                continue;
+            }
+
+            if ($active && in_array($keyword, ['hostname', 'user', 'port', 'identityfile', 'identityagent'], true) && !isset($values[$keyword])) {
+                $values[$keyword] = $this->expandSshConfigTokens($value, $hostName, $values);
+            }
+        }
+
+        return $values;
+    }
+
+    /**
+     * @param SSH2 $connection
+     * @param string $username
+     * @param mixed $key
+     * @param string|null $password
+     * @param Agent|null $agent
+     * @return bool
+     */
+    protected function loginSshConnection(SSH2 $connection, string $username, $key, ?string $password, ?Agent $agent): bool
+    {
+        if ($key) {
+            return $connection->login($username, $key);
+        }
+
+        if ($password !== null && $password !== '') {
+            return $connection->login($username, $password);
+        }
+
+        return $agent ? $connection->login($username, $agent) : false;
+    }
+
+    protected function makeSshAgent(?string $identityAgent): Agent
+    {
+        $address = null;
+        if ($identityAgent && strtoupper($identityAgent) === 'SSH_AUTH_SOCK') {
+            $address = null;
+        } elseif ($identityAgent && strtolower($identityAgent) !== 'none') {
+            $address = $this->expandHomePath($identityAgent);
+        } elseif (PHP_OS_FAMILY === 'Windows' && !getenv('SSH_AUTH_SOCK')) {
+            $address = '\\\\.\\pipe\\openssh-ssh-agent';
+        } elseif ($identityAgent && strtolower($identityAgent) === 'none') {
+            $this->printErrorAndExit('SSH config disables IdentityAgent, and no password or privateKey was provided.');
+        }
+
+        try {
+            return new Agent($address);
+        } catch (\Throwable $e) {
+            $this->printErrorAndExit('SSH agent authentication is unavailable: ' . $e->getMessage());
+        }
+    }
+
+    protected function resolvePrivateKeyPath(string $privateKey, bool $fromSshConfig): string
+    {
+        $privateKey = $this->expandHomePath($privateKey);
+
+        if (is_file($privateKey)) {
+            return $privateKey;
+        }
+
+        if ($fromSshConfig) {
+            return $privateKey;
+        }
+
+        return $this->sourcePath($privateKey);
+    }
+
+    protected function getDefaultSshUsername(): ?string
+    {
+        return getenv('USER') ?: getenv('USERNAME') ?: null;
+    }
+
+    /**
+     * @param string[] $patterns
+     */
+    protected function sshConfigHostMatches(string $hostName, array $patterns): bool
+    {
+        $matched = false;
+        foreach ($patterns as $pattern) {
+            $pattern = trim($pattern);
+            if ($pattern === '') {
+                continue;
+            }
+
+            $negated = str_starts_with($pattern, '!');
+            $pattern = $negated ? substr($pattern, 1) : $pattern;
+            $regex = '/^' . str_replace(['\*', '\?'], ['.*', '.'], preg_quote($pattern, '/')) . '$/i';
+
+            if (preg_match($regex, $hostName)) {
+                if ($negated) {
+                    return false;
+                }
+                $matched = true;
+            }
+        }
+
+        return $matched;
+    }
+
+    protected function stripSshConfigComment(string $line): string
+    {
+        $quote = null;
+        $length = strlen($line);
+        for ($i = 0; $i < $length; $i++) {
+            if (($line[$i] === '"' || $line[$i] === "'") && ($i === 0 || $line[$i - 1] !== '\\')) {
+                $quote = $quote === $line[$i] ? null : ($quote ?: $line[$i]);
+            }
+
+            if ($line[$i] === '#' && $quote === null) {
+                return substr($line, 0, $i);
+            }
+        }
+
+        return $line;
+    }
+
+    /**
+     * @param array<string,string> $values
+     */
+    protected function expandSshConfigTokens(string $value, string $hostName, array $values): string
+    {
+        return str_replace(
+            ['%h', '%n', '%p', '%r'],
+            [$values['hostname'] ?? $hostName, $hostName, $values['port'] ?? '22', $values['user'] ?? ''],
+            $this->expandHomePath($value)
+        );
+    }
+
+    protected function expandHomePath(string $path): string
+    {
+        if ($path === '~' || str_starts_with($path, '~/') || str_starts_with($path, '~\\')) {
+            $home = getenv('HOME') ?: getenv('USERPROFILE');
+            if (!$home && getenv('HOMEDRIVE') && getenv('HOMEPATH')) {
+                $home = getenv('HOMEDRIVE') . getenv('HOMEPATH');
+            }
+
+            if ($home) {
+                return rtrim($home, '/\\') . substr($path, 1);
+            }
+        }
+
+        return $path;
     }
 
     /**
