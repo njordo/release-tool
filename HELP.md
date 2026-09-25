@@ -913,7 +913,9 @@ Explicit task values override the SSH config values, so you can set `host`, `por
 - `sshConfig` reads `HostName`, `User`, `Port`, `IdentityFile`, and `IdentityAgent` from OpenSSH config.
 - Agent auth is used automatically when `sshConfig` is supplied.
 - If `IdentityFile` is set, the matching key must be loaded in ssh-agent.
-- If a command times out or writes only stderr, the task fails.
+- If a command exits with a non-zero status or times out, the task fails and the run stops. The command's stdout and stderr are printed first.
+- If the server does not report an exit status, the tool falls back to the old rule: a command that writes only stderr fails.
+- A failed run exits the tool with status `1`.
 
 ---
 

@@ -586,25 +586,31 @@ class Release
                 $commandText = sprintf('cd %s && %s', $this->escapePosixShellArgument($targetPath), $commandText);
 
                 // Run command and drain both STDOUT and STDERR
-                $output = (string) $ssh->exec($commandText);
+                $output = $ssh->exec($commandText);
                 $errorOutput = $ssh->getStdError();
-
-                if ($output === '' && $errorOutput === '' && $ssh->isTimeout()) {
-                    $this->printErrorAndExit(sprintf('Remote command timed out: %s', $commandText));
-                }
-
-                if ($output === '' && $errorOutput !== '') {
-                    $this->printErrorAndExit(sprintf('Remote command failed: %s; stderr: %s', $commandText, trim($errorOutput)));
-                }
 
                 if ($output === false) {
                     $this->printErrorAndExit(sprintf('Remote command failed: %s', $commandText));
-                } else {
-                    $this->printString(sprintf('%s@%s:%s# %s', $username, $host, $targetPath, $commandText));
-                    $this->printText(trim($output));
-                    if ($errorOutput !== '') {
-                        $this->printText(trim($errorOutput));
+                }
+
+                $this->printString(sprintf('%s@%s:%s# %s', $username, $host, $targetPath, $commandText));
+                $this->printText(trim($output));
+                if ($errorOutput !== '') {
+                    $this->printText(trim($errorOutput));
+                }
+
+                if ($ssh->isTimeout()) {
+                    $this->printErrorAndExit(sprintf('Remote command timed out: %s', $commandText));
+                }
+
+                // The exit status is authoritative. Fall back to the stderr heuristic only when the server did not report one.
+                $exitStatus = $ssh->getExitStatus();
+                if ($exitStatus === false) {
+                    if ($output === '' && $errorOutput !== '') {
+                        $this->printErrorAndExit(sprintf('Remote command failed: %s; stderr: %s', $commandText, trim($errorOutput)));
                     }
+                } elseif ($exitStatus !== 0) {
+                    $this->printErrorAndExit(sprintf('Remote command failed with exit code %d: %s', $exitStatus, $commandText));
                 }
             }
 
@@ -1228,7 +1234,7 @@ class Release
     protected function printErrorAndExit(string $message): void
     {
         $this->printError($message);
-        exit;
+        exit(1);
     }
 
     /**
