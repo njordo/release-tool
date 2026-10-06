@@ -26,6 +26,12 @@ class Release
     protected const PACKAGE_FILE_NAME = 'package.json';
     protected const TARGET_FOLDER_NAME = 'release';
 
+    /** Task types that read files from the source folder */
+    protected const SOURCE_TASK_TYPES = ['copy', 'zip', 'phar', 'pot', 'delete', 'command'];
+
+    /** Folder the tool was started in: the project, which holds the config file and the release folder */
+    protected string $projectFolderPath;
+    /** Folder the tasks read from: the project itself, or the git stage when building from git */
     protected string $sourceFolderPath;
     protected string $targetFolderPath;
     protected ?object $composer;
@@ -34,6 +40,48 @@ class Release
 
     protected array $taskIds;
     protected array $skipTaskIds;
+
+    /** True when the source is a stage exported from git rather than the working tree */
+    protected bool $isGitSource = false;
+
+    /**
+     * phar.readonly cannot be changed at runtime, so when the config builds a PHAR and PHP has it enabled, run the tool
+     * again in a child PHP started with it disabled. Call this before creating the instance. Does not return when it
+     * re-runs the tool.
+     *
+     * @param array $argv Command line arguments, as received by the entry script
+     */
+    public static function ensurePharWritable(array $argv): void
+    {
+        $readonly = ini_get('phar.readonly');
+
+        if (!$readonly || $readonly === '0' || getenv('RELEASE_TOOL_REEXEC')) {
+            return;
+        }
+
+        $configFileName = static::CONFIG_FILE_NAME;
+        foreach (array_slice($argv, 1) as $arg) {
+            if (str_starts_with($arg, 'config=')) {
+                $configFileName = substr($arg, strlen('config='));
+            }
+        }
+
+        $config = is_file($configFileName) ? json_decode((string) file_get_contents($configFileName), true) : null;
+        $buildsPhar = false;
+        foreach ($config['tasks'] ?? [] as $task) {
+            $buildsPhar = $buildsPhar || ($task['type'] ?? 'zip') === 'phar';
+        }
+
+        if (!$buildsPhar) {
+            return;
+        }
+
+        putenv('RELEASE_TOOL_REEXEC=1');
+        $command = escapeshellarg(PHP_BINARY) . ' -d phar.readonly=0 ' . implode(' ', array_map('escapeshellarg', $argv));
+        passthru($command, $exitCode);
+
+        exit($exitCode);
+    }
 
     /**
      * Constructor - Initialize the release process
@@ -47,7 +95,8 @@ class Release
         $this->printHeader();
 
         // Set source folder to current working directory
-        $this->sourceFolderPath = getcwd();
+        $this->projectFolderPath = getcwd();
+        $this->sourceFolderPath = $this->projectFolderPath;
         $this->targetFolderPath = $this->sourcePath(static::TARGET_FOLDER_NAME);
 
         // Validate that target path is different from source path to prevent issues
@@ -69,16 +118,22 @@ class Release
             }
         }
 
-        // Load configuration files
-        $composerFilePath = $this->sourcePath(static::COMPOSER_FILE_NAME);
-        $packageFilePath = $this->sourcePath(static::PACKAGE_FILE_NAME);
-        $this->composer = file_exists($composerFilePath) ? json_decode(file_get_contents($composerFilePath)) : null;
-        $this->package = file_exists($packageFilePath) ? json_decode(file_get_contents($packageFilePath)) : null;
+        // The config is always read from the project: it says where the source comes from, so it is needed before
+        // any stage exists
         $this->config = json_decode(file_get_contents($this->sourcePath($configFileName)), JSON_OBJECT_AS_ARRAY);
 
         // Extract task IDs from CLI parameters (comma-separated), ignore others
         $this->taskIds = $this->parseCsvArgumentValues($this->getArgument('tasks'));
         $this->skipTaskIds = $this->parseCsvArgumentValues($this->getArgument('skip-tasks'));
+
+        // May switch the source folder to a git stage
+        $this->setUpSource();
+
+        // Load configuration files
+        $composerFilePath = $this->sourcePath(static::COMPOSER_FILE_NAME);
+        $packageFilePath = $this->sourcePath(static::PACKAGE_FILE_NAME);
+        $this->composer = file_exists($composerFilePath) ? json_decode(file_get_contents($composerFilePath)) : null;
+        $this->package = file_exists($packageFilePath) ? json_decode(file_get_contents($packageFilePath)) : null;
 
         $this->printVar('Source folder', $this->sourceFolderPath);
         $this->printVar('Target folder', $this->targetFolderPath);
@@ -99,13 +154,9 @@ class Release
         foreach ($this->config['tasks'] as $i => $task) {
             // Build dynamic method name based on task type
             $methodName = sprintf('process%sTask', ucfirst($this->getTaskType($task)));
-            $taskId = $task['id'] ?? null;
-            $isSkippedByConfig = array_key_exists('skip', $task);
-            $isExcludedByTasksFilter = !empty($this->taskIds) && ($taskId === null || !in_array($taskId, $this->taskIds, true));
-            $isExcludedBySkipTasksFilter = !empty($this->skipTaskIds) && $taskId !== null && in_array($taskId, $this->skipTaskIds, true);
 
             // Skip task if marked for skipping, not in the allow-list, or explicitly excluded from the CLI
-            if ($isSkippedByConfig || $isExcludedByTasksFilter || $isExcludedBySkipTasksFilter) {
+            if (!$this->isTaskSelected($task)) {
                 $this->printStatus(sprintf('Task #%d', ++$i), 'warning', 'SKIPPED');
                 continue;
             }
@@ -121,6 +172,164 @@ class Release
                 }
             }
         }
+    }
+
+    /**
+     * Whether a task runs, considering its "skip" flag and the tasks / skip-tasks CLI filters
+     */
+    protected function isTaskSelected(array $task): bool
+    {
+        $taskId = $task['id'] ?? null;
+        $isSkippedByConfig = array_key_exists('skip', $task);
+        $isExcludedByTasksFilter = !empty($this->taskIds) && ($taskId === null || !in_array($taskId, $this->taskIds, true));
+        $isExcludedBySkipTasksFilter = !empty($this->skipTaskIds) && $taskId !== null && in_array($taskId, $this->skipTaskIds, true);
+
+        return !$isSkippedByConfig && !$isExcludedByTasksFilter && !$isExcludedBySkipTasksFilter;
+    }
+
+    /**
+     * Whether a task reads files from the source folder. Tasks that only touch the release folder (clean, mkdir, and
+     * ssh uploads of release/...) do not need the source to be staged.
+     */
+    protected function taskReadsSources(array $task): bool
+    {
+        $type = $this->getTaskType($task);
+
+        if ($type === 'ssh') {
+            foreach ($task['items'] ?? [] as $item) {
+                foreach ($this->getTaskItemFolders($item) as $folder) {
+                    $folder = trim($this->path((string) $folder), '/');
+
+                    if ($folder !== static::TARGET_FOLDER_NAME && !str_starts_with($folder, static::TARGET_FOLDER_NAME . '/')) {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        return in_array($type, static::SOURCE_TASK_TYPES, true);
+    }
+
+    protected function selectedTasksReadSources(): bool
+    {
+        foreach ($this->config['tasks'] as $task) {
+            if ($this->isTaskSelected($task) && $this->taskReadsSources($task)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Decide where the tasks read their source from.
+     *
+     * - No "source" block: the working tree, as the tool always did, with a notice recommending the git mode.
+     * - "source": {"type": "working-tree"}: the same, without the notice.
+     * - "source": {"type": "git"}: a stage exported from a commit and prepared by the "prepare" steps, reused while the
+     *   commit and the steps are unchanged. Skipped when no selected task reads sources.
+     */
+    protected function setUpSource(): void
+    {
+        $source = $this->config['source'] ?? null;
+        $type = $source === null ? 'working-tree' : ($source['type'] ?? 'git');
+
+        if (!in_array($type, ['git', 'working-tree'], true)) {
+            $this->printErrorAndExit(sprintf('Unknown source type "%s", expected "git" or "working-tree".', $type));
+        }
+
+        if ($type === 'working-tree') {
+            if ($source === null && $this->selectedTasksReadSources()) {
+                $this->printWarning(
+                    'Packaging the working tree: uncommitted changes and the local vendor and node_modules folders are included. '
+                    . 'Recommended: build from git in Docker containers, see "Building from git in Docker" in HELP.md. '
+                    . 'Add "source": {"type": "working-tree"} to the config to hide this notice.'
+                );
+            }
+
+            return;
+        }
+
+        if (!$this->selectedTasksReadSources()) {
+            $this->printVar('Source', 'not staged, the selected tasks do not read sources');
+
+            return;
+        }
+
+        try {
+            $this->stageSourceFromGit($source);
+        } catch (Exception $e) {
+            $this->printErrorAndExit($e->getMessage());
+        }
+    }
+
+    /**
+     * @throws Exception
+     */
+    protected function stageSourceFromGit(array $source): void
+    {
+        $stage = new GitStage($this->projectFolderPath, $this->cacheRootPath());
+
+        $ref = $this->getArgument('ref', $source['ref'] ?? 'HEAD');
+        $sha = $stage->resolveRef($ref);
+
+        foreach ($stage->assertCommitted($sha) as $untrackedPath) {
+            $this->printWarning(sprintf('Untracked file is not part of the build: %s', $untrackedPath));
+        }
+
+        $stage->lock();
+
+        $prepareSteps = $source['prepare'] ?? [];
+        // The ref is not part of the hash: the commit is compared separately
+        $prepareHash = sha1(json_encode($prepareSteps));
+        $rebuild = in_array($this->getArgument('rebuild'), ['1', 'true', 'yes'], true);
+
+        if ($rebuild || !$stage->isFresh($sha, $prepareHash)) {
+            $this->printVar('Source', sprintf('building %s (%s)', $ref, substr($sha, 0, 10)));
+
+            $stage->rebuild($sha, $prepareHash, function (string $stagePath) use ($prepareSteps) {
+                chdir($stagePath);
+
+                $runner = $this->makeCommandRunner($stagePath);
+                foreach ($prepareSteps as $step) {
+                    $runner->run($step, true);
+                }
+            });
+        } else {
+            $this->printVar('Source', sprintf('reusing %s (%s), pass rebuild=1 to build it again', $ref, substr($sha, 0, 10)));
+        }
+
+        $stage->linkRelease($this->targetFolderPath);
+
+        $this->sourceFolderPath = $stage->path();
+        $this->isGitSource = true;
+        chdir($this->sourceFolderPath);
+    }
+
+    /**
+     * Folder for everything the tool keeps between runs: git stages and the package manager caches of Docker commands
+     */
+    protected function cacheRootPath(): string
+    {
+        $path = getenv('RELEASE_TOOL_CACHE_DIR');
+
+        if (!$path) {
+            $base = getenv('XDG_CACHE_HOME') ?: rtrim((string) getenv('HOME'), '/') . '/.cache';
+            $path = $base . '/release-tool';
+        }
+
+        return rtrim($this->path($path), '/');
+    }
+
+    protected function makeCommandRunner(string $sourceFolderPath): CommandRunner
+    {
+        return new CommandRunner(
+            new DockerRunner($this->cacheRootPath() . '/cache'),
+            $sourceFolderPath,
+            fn (string $message) => $this->printWarning($message)
+        );
     }
 
     protected function processCleanTask(): void
@@ -166,14 +375,8 @@ class Release
      */
     protected function processCommandTask(array $task): void
     {
-        foreach ($task['items'] as $command) {
-            $result = shell_exec($command);
-
-            // Check if command execution failed
-            if ($result === FALSE) {
-                $this->printErrorAndExit(sprintf('Command "%s" can not be completed, result: %s', $command, $result));
-            }
-        }
+        // Host commands only stop the run on failure when building from git, to keep older configs working as they did
+        $this->makeCommandRunner($this->sourceFolderPath)->run($task, $this->isGitSource);
     }
 
     /**
@@ -333,7 +536,7 @@ class Release
         if ($readonly && $readonly !== '0') {
             @ini_set('phar.readonly', '0');
             if (ini_get('phar.readonly') !== '0') {
-                $this->printErrorAndExit('Unable to create PHAR: phar.readonly is enabled.');
+                $this->printErrorAndExit('Unable to create PHAR: phar.readonly is enabled. Start PHP with "-d phar.readonly=0" or set "phar.readonly = Off" in the CLI php.ini.');
             }
         }
 
@@ -1218,10 +1421,31 @@ class Release
      */
     protected function printError(string $message): void
     {
+        // Termwind parses the message as HTML: without escaping, text such as "ref=<ref>" would be swallowed as a tag
+        $message = htmlspecialchars($message, ENT_NOQUOTES);
+
         render(<<<HTML
           <div>
             <span class="bg-red-500 text-red px-1 mr-1">Error</span>
             <span class="text-red">$message</span>
+          </div>
+        HTML
+        );
+    }
+
+    /**
+     * Print warning message using Termwind
+     *
+     * @param string $message Warning message to display
+     */
+    protected function printWarning(string $message): void
+    {
+        $message = htmlspecialchars($message, ENT_NOQUOTES);
+
+        render(<<<HTML
+          <div>
+            <span class="bg-yellow-500 text-black px-1 mr-1">Warning</span>
+            <span class="text-yellow">$message</span>
           </div>
         HTML
         );

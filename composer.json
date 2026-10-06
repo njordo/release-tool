@@ -8,6 +8,9 @@
             "Financialplugins\\ReleaseTool\\": "src/"
         }
     },
+    "bin": [
+        "bin/release-tool"
+    ],
     "require": {
         "ext-simplexml": "*",
         "ext-zip": "*",

@@ -1,0 +1,5 @@
+#!/usr/bin/env php
+<?php
+
+// Entry point for a symlink on the PATH: ln -s ~/projects/release-tool/bin/release-tool ~/.local/bin/release-tool
+require __DIR__ . '/../make';
