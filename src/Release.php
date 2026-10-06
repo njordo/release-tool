@@ -1185,7 +1185,8 @@ class Release
      */
     protected function sourcePath(string $relativePath): string
     {
-        return trim($this->sourceFolderPath . '/' . $this->path($relativePath), '/');
+        // Only trim the trailing slash: trimming the leading one turns absolute POSIX paths into relative ones
+        return rtrim($this->sourceFolderPath . '/' . $this->path($relativePath), '/');
     }
 
     /**
@@ -1196,7 +1197,7 @@ class Release
      */
     protected function targetPath(string $relativePath): string
     {
-        return trim($this->targetFolderPath . '/' . $this->path($relativePath), '/');
+        return rtrim($this->targetFolderPath . '/' . $this->path($relativePath), '/');
     }
 
     /**
