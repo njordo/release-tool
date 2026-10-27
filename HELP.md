@@ -89,16 +89,32 @@ If dependencies are not installed yet:
 composer install
 ```
 
-### Optional: `release-tool` on the PATH
+### Install the `release-tool` shortcut on WSL
 
-`bin/release-tool` is an entry point you can link, so that you can run the tool from any project without spelling out the path to `make`:
+In a WSL terminal, assuming the tool is copied to `~/projects/release-tool`, install its dependencies and create a shortcut:
 
 ```shell
-ln -s ~/projects/release-tool/bin/release-tool ~/.local/bin/release-tool
+cd ~/projects/release-tool
+composer install
+mkdir -p "$HOME/.local/bin"
+ln -s "$HOME/projects/release-tool/bin/release-tool" "$HOME/.local/bin/release-tool"
+```
+
+If you copied it elsewhere, replace `~/projects/release-tool` and the symlink target with the actual location.
+
+Ensure `~/.local/bin` is on your `PATH`. If `command -v release-tool` does not find it, add this line to `~/.bashrc` (or your shell's startup file):
+
+```shell
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Run `source ~/.bashrc` in Bash or open a new terminal, then check with `command -v release-tool`. From any project root, you can now run:
+
+```shell
 release-tool config=build.json tasks=deploy
 ```
 
-`php ~/projects/release-tool/make ...` keeps working and is equivalent.
+The shortcut points to the checkout, so recreate it if you move the checkout. Running `php /path/to/release-tool/make ...` remains equivalent.
 
 ### PHAR creation
 
@@ -112,7 +128,7 @@ echo 'phar.readonly = Off' | sudo tee /etc/php/<version>/cli/conf.d/99-release-t
 
 ## Running the Tool
 
-Run from the project root. The examples use `release-tool` (see [Optional: `release-tool` on the PATH](#optional-release-tool-on-the-path)); on Windows or without the link, use `php path/to/make` instead.
+Run from the project root. The examples use `release-tool` (see [Install the `release-tool` shortcut on WSL](#install-the-release-tool-shortcut-on-wsl)); on Windows or without the link, use `php path/to/make` instead.
 
 ```shell
 release-tool
