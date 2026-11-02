@@ -44,6 +44,11 @@ class Release
     /** True when the source is a stage exported from git rather than the working tree */
     protected bool $isGitSource = false;
 
+    /** Notice text (from the config's top-level "agentNotice") appended to PHP copyright headers, or null when none */
+    protected ?string $agentNoticeText = null;
+    /** Whether the currently processing task should receive the agent notice (a task may opt out with "agentNotice": false) */
+    protected bool $agentNoticeEnabled = true;
+
     /**
      * phar.readonly cannot be changed at runtime, so when the config builds a PHAR and PHP has it enabled, run the tool
      * again in a child PHP started with it disabled. Call this before creating the instance. Does not return when it
@@ -122,6 +127,9 @@ class Release
         // any stage exists
         $this->config = json_decode(file_get_contents($this->sourcePath($configFileName)), JSON_OBJECT_AS_ARRAY);
 
+        // Optional agent/license notice appended to PHP copyright headers; absent key leaves it off so the tool stays generic
+        $this->agentNoticeText = $this->config['agentNotice'] ?? null;
+
         // Extract task IDs from CLI parameters (comma-separated), ignore others
         $this->taskIds = $this->parseCsvArgumentValues($this->getArgument('tasks'));
         $this->skipTaskIds = $this->parseCsvArgumentValues($this->getArgument('skip-tasks'));
@@ -152,6 +160,9 @@ class Release
     protected function process(): void
     {
         foreach ($this->config['tasks'] as $i => $task) {
+            // Per-task opt-out for the agent notice; defaults on so every task's PHP headers carry it
+            $this->agentNoticeEnabled = ($task['agentNotice'] ?? true) !== false;
+
             // Build dynamic method name based on task type
             $methodName = sprintf('process%sTask', ucfirst($this->getTaskType($task)));
 
@@ -1125,21 +1136,24 @@ class Release
             $author = $this->composer->authors[0] ?? [];
             $description = $this->composer->description ?? $this->composer->name;
 
-            // Replace opening PHP tag with copyright header
-            $contents = str_replace(
-                '<?php',
-                sprintf(
-                    $copyright,
-                    $description,
-                    str_repeat('-', strlen($description)),
-                    $file->getFilename(),
-                    $author->name ?? '',
-                    $author->name ?? '',
-                    $author->email ?? '',
-                    $author->homepage ?? '',
-                ),
-                $contents
+            $header = sprintf(
+                $copyright,
+                $description,
+                str_repeat('-', strlen($description)),
+                $file->getFilename(),
+                $author->name ?? '',
+                $author->name ?? '',
+                $author->email ?? '',
+                $author->homepage ?? '',
             );
+
+            // Append the agent/license notice after the copyright header when the config supplies one and the task opts in
+            if ($this->agentNoticeEnabled && $this->agentNoticeText) {
+                $header .= "\n" . $this->agentNoticeText;
+            }
+
+            // Replace opening PHP tag with copyright header (plus notice)
+            $contents = str_replace('<?php', $header, $contents);
         }
         if ($file->getExtension() == 'js') {
             if (!$this->package) {
